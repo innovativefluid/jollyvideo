@@ -40,7 +40,7 @@ bun run preview        # the panel in Sharkord's styles, without a server
 
 The client may only use classes that Sharkord's stylesheet has. They all live in `src/client/classes.ts`, and `bun run check` checks them against Sharkord's source.
 
-Push a tag such as `v0.2.0` to publish a release.
+To release: GitHub → Actions → **Release** → Run workflow with the version from `manifest.json`. It tags, tests, builds and opens a draft release to publish.
 
 ## License
 
