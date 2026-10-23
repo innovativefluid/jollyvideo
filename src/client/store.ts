@@ -4,6 +4,8 @@
  */
 import type {} from "@sharkord/plugin-sdk/client";
 import { PLUGIN_ID, type TControl, type TJollyvideo, type TPlayer, type TViewer } from "../contract";
+import type { TMessage } from "../i18n";
+import { errorMessage } from "./text";
 
 type TActions = TJollyvideo["actions"];
 
@@ -16,7 +18,7 @@ export type TView = {
   /** an action is on its way */
   busy: boolean;
   /** why the user's last action failed */
-  failure: string | null;
+  failure: TMessage | null;
 };
 
 const FAILURE_SHOWN_MS = 6_000;
@@ -52,8 +54,7 @@ const call = <K extends keyof TActions>(name: K, payload?: TActions[K]["payload"
 
 const fail = (error: unknown) => {
   clearTimeout(failureTimer);
-  const message = error instanceof Error && error.message ? error.message : "Something went wrong";
-  set({ failure: message });
+  set({ failure: errorMessage(error) });
   failureTimer = setTimeout(() => set({ failure: null }), FAILURE_SHOWN_MS);
 };
 

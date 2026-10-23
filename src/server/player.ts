@@ -1,15 +1,16 @@
 /**
  * The player of one voice channel: a queue, the video playing, and the lock.
  *
- * Everything outside (yt-dlp, ffmpeg, mediasoup, the clock) comes in through
- * `TPlayerDeps`, so the state machine can be tested on its own.
+ * Everything outside (yt-dlp, ffmpeg, mediasoup, the disk, the clock) comes in
+ * through `TPlayerDeps`, so the state machine can be tested on its own.
  */
 import { mkdir, rm } from "fs/promises";
 import path from "path";
 import { MAX_QUEUE, type TPlayer, type TQueueEntry } from "../contract";
+import type { TMessage } from "../i18n";
 import type { TEncodeOptions, TEncoder, TEncoderEvents, TExit } from "./encoder";
 import { h264Level } from "./encoder";
-import { errorText, UserError, userText } from "./errors";
+import { errorText, UserError, userMessage } from "./errors";
 import type { TConnection, TOutput } from "./output";
 import type { TSettings } from "./settings";
 import { parseQuery, type TResolved, type TSource, type TYouTube } from "./youtube";
@@ -21,6 +22,8 @@ export type TPlayerDeps = {
   ready(): Promise<void>;
   ffmpeg(): string | undefined;
   cacheDir: string;
+  /** the disk downloads go to, shared by every player */
+  disk: TDisk;
   createOutput(channelId: number): TOutput;
   encode(options: TEncodeOptions, events: TEncoderEvents): TEncoder;
   thumbnail(videoId: string): string;
@@ -33,17 +36,35 @@ export type TPlayerDeps = {
   now(): number;
 };
 
+/** one file being downloaded */
+type TDownload = { file: string | null; bytes: number; total: number | null; done: boolean };
+
 type TItem = {
   id: string;
   source: TSource;
   addedBy: number;
+  /** what a playlist said about the video, until it is looked up */
+  hint: { title: string; duration: number } | null;
   video: TResolved | null;
-  progress: number | null;
   resolving: Promise<TResolved> | null;
-  fetching: Promise<string | null> | null;
-  file: string | null;
+  fetching: TFetch | null;
+  /** separate video and audio, readable while they grow; or one merged file, readable when done */
+  downloads: { separate: boolean; files: TDownload[] } | null;
   abort: AbortController;
 };
+
+export type TDisk = {
+  /** free bytes on the disk holding `dir`, or null when it cannot be told */
+  free(dir: string): Promise<number | null>;
+  /** bytes promised to downloads still running */
+  reserved: number;
+};
+
+/** a download on its way: stopped on its own when its video is no longer next in line */
+type TFetch = { abort: AbortController; dir: string; done: Promise<void> };
+
+/** a playlist still being looked up, shown at the end of the queue */
+type TPending = { id: string; addedBy: number; abort: AbortController };
 
 type TRun = { encoder: TEncoder; connection: TConnection; onAir: boolean };
 
@@ -55,6 +76,8 @@ type TCurrent = {
   run: TRun | null;
   /** bumped by every start and stop, so a start that finishes late knows it is stale */
   attempt: number;
+  /** the attempt of a start still on its way */
+  starting: number | null;
   /** when livestream restarts happened, for the restart limit */
   restarts: number[];
   retried: boolean;
@@ -63,19 +86,35 @@ type TCurrent = {
 const LIVE_RESTARTS = 3;
 const LIVE_RESTART_WINDOW_MS = 10 * 60_000;
 const ERROR_SHOWN_MS = 15_000;
+const RETRY_AFTER_SECONDS = 60;
+/** playback starts once this much past the position is downloaded */
+const BUFFER_SECONDS = 20;
+/** room left on the disk after a download */
+const DISK_RESERVE = 512 * 1024 * 1024;
 
 const minutes = (seconds: number) => Math.round(seconds / 60);
+
+let fetches = 0;
 
 /** one count across every player, so a new player never goes back in time */
 let revisions = 0;
 export const currentRevision = (): number => revisions;
 
+/** the bytes a download takes; without sizes from YouTube, a generous 8 Mbit/s */
+const sizeOf = (video: TResolved) => {
+  const sizes = video.parts ? [video.parts.video.size, video.parts.audio.size] : [null];
+  return sizes.every((size) => size !== null) ? sizes.reduce<number>((sum, size) => sum + size!, 0) : video.duration * 1_000_000;
+};
+
+const fraction = (download: TDownload) => (download.done ? 1 : download.total ? Math.min(1, download.bytes / download.total) : 0);
+
 export class ChannelPlayer {
   private queue: TItem[] = [];
+  private pending: TPending[] = [];
   private current: TCurrent | null = null;
   private output: TOutput | null = null;
   private locked = false;
-  private error: string | null = null;
+  private error: TMessage | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | undefined;
   private destroyed = false;
   private rev = ++revisions;
@@ -94,41 +133,31 @@ export class ChannelPlayer {
     return this.current !== null;
   }
 
-  get idle(): boolean {
-    return !this.current && this.queue.length === 0;
-  }
-
   // -- what people can do --------------------------------------------------
 
   add(query: string, userId: number): void {
     this.assertAlive();
     const source = parseQuery(query);
-    if (this.queue.length >= MAX_QUEUE) throw new UserError("The queue is full");
-    if (!this.current && !this.deps.slotFree()) throw new UserError("Too many videos are playing on this server");
-    const item: TItem = {
-      id: crypto.randomUUID(),
-      source,
-      addedBy: userId,
-      video: null,
-      progress: null,
-      resolving: null,
-      fetching: null,
-      file: null,
-      abort: new AbortController(),
-    };
-    this.queue.push(item);
+    if (this.queue.length + this.pending.length >= MAX_QUEUE) throw new UserError("error.queueFull");
+    if (!this.current && !this.deps.slotFree()) throw new UserError("error.slots");
     this.setError(null);
-    this.resolve(item).catch((error) => this.dropQueued(item, error));
-    if (!this.current) void this.advance();
-    else this.prefetch();
+    if (source.kind === "playlist") {
+      this.addPlaylist(source.listId, userId);
+    } else {
+      const item = this.item(source, userId, null);
+      this.queue.push(item);
+      // looked up right away, so a wrong link says so while its sender still looks
+      this.resolve(item).catch((error) => this.dropQueued(item, error));
+      this.next();
+    }
     this.changed();
   }
 
   pause(): void {
     const current = this.requireCurrent();
-    if (current.item.video?.live) throw new UserError("Livestreams can't be paused");
+    if (current.item.video?.live) throw new UserError("error.livePause");
     if (current.state === "paused") return;
-    if (current.state !== "playing") throw new UserError("Still loading");
+    if (current.state !== "playing") throw new UserError("error.stillLoading");
     current.base = this.position(current);
     current.state = "paused";
     this.stopRun(current);
@@ -140,27 +169,23 @@ export class ChannelPlayer {
     if (current.state !== "paused") return;
     current.state = "loading";
     this.changed();
-    // still downloading: it starts once the file is in
-    if (this.canStart(current)) this.startRun(current, current.base);
+    this.maybeStart(current);
   }
 
   seek(position: number): void {
     const current = this.requireCurrent();
     const video = current.item.video;
-    if (!video) throw new UserError("Still loading");
-    if (video.live) throw new UserError("Livestreams can't be seeked");
+    if (!video) throw new UserError("error.stillLoading");
+    if (video.live) throw new UserError("error.liveSeek");
     const end = video.duration > 0 ? video.duration - 1 : Number.MAX_SAFE_INTEGER;
-    const target = Math.max(0, Math.min(end, Math.floor(position)));
-    current.base = target;
-    // paused, or still downloading: it starts there later
-    if (current.state === "paused" || !this.canStart(current)) {
-      this.changed();
-      return;
+    current.base = Math.max(0, Math.min(end, Math.floor(position)));
+    // paused: it starts there when resumed
+    if (current.state !== "paused") {
+      current.state = "loading";
+      this.stopRun(current);
+      this.maybeStart(current);
     }
-    current.state = "loading";
-    this.stopRun(current);
     this.changed();
-    this.startRun(current, target);
   }
 
   skip(): void {
@@ -175,21 +200,38 @@ export class ChannelPlayer {
 
   clear(): void {
     for (const item of this.queue.splice(0)) this.discard(item);
+    for (const pending of this.pending.splice(0)) pending.abort.abort();
     this.changed();
   }
 
   remove(id: string): void {
+    const pending = this.pending.find((entry) => entry.id === id);
+    if (pending) {
+      pending.abort.abort();
+      this.pending.splice(this.pending.indexOf(pending), 1);
+    }
     const index = this.queue.findIndex((item) => item.id === id);
-    if (index === -1) return;
-    const [item] = this.queue.splice(index, 1);
-    this.discard(item!);
+    if (index !== -1) {
+      const [item] = this.queue.splice(index, 1);
+      this.discard(item!);
+      this.prefetch();
+    }
+    if (pending || index !== -1) this.changed();
+  }
+
+  /** moves a queued video so it ends up at index `to` */
+  move(id: string, to: number): void {
+    const from = this.queue.findIndex((item) => item.id === id);
+    if (from === -1) return;
+    const [item] = this.queue.splice(from, 1);
+    this.queue.splice(Math.max(0, Math.min(this.queue.length, Math.floor(to))), 0, item!);
     this.prefetch();
     this.changed();
   }
 
   /** starts the queue again after it waited for a free slot */
   retry(): void {
-    if (!this.current && this.queue.length && !this.destroyed) void this.advance();
+    if (!this.current && this.queue.length && !this.destroyed) this.background(this.advance());
   }
 
   setLocked(locked: boolean): void {
@@ -201,6 +243,7 @@ export class ChannelPlayer {
   destroy(): Promise<void> {
     this.destroyed = true;
     for (const item of this.queue.splice(0)) this.discard(item);
+    for (const pending of this.pending.splice(0)) pending.abort.abort();
     const current = this.current;
     this.current = null;
     const stopped = current ? this.stopRun(current) : Promise.resolve();
@@ -214,18 +257,21 @@ export class ChannelPlayer {
     const current = this.current;
     const entry = (item: TItem) => ({
       id: item.id,
-      title: item.video?.title ?? (item.source.kind === "search" ? item.source.text : "YouTube video"),
-      duration: item.video?.duration ?? 0,
+      title: item.video?.title ?? item.hint?.title ?? (item.source.kind === "search" ? item.source.text : "YouTube video"),
+      duration: item.video?.duration ?? item.hint?.duration ?? 0,
       live: item.video?.live ?? false,
       thumbnail: item.video ? this.deps.thumbnail(item.video.videoId) : "",
       addedBy: item.addedBy,
-      progress: item.progress,
+      progress: this.progress(item),
     });
+    const pending = this.pending.map(
+      (entry): TQueueEntry => ({ id: entry.id, title: "", duration: 0, live: false, thumbnail: "", addedBy: entry.addedBy, progress: null, state: "resolving", playlist: true }),
+    );
     return {
       channelId: this.channelId,
       rev: this.rev,
       now: current ? { ...entry(current.item), state: current.state, position: Math.floor(this.position(current)) } : null,
-      queue: this.queue.map((item): TQueueEntry => ({ ...entry(item), state: item.video ? "ready" : "resolving" })),
+      queue: [...this.queue.map((item): TQueueEntry => ({ ...entry(item), state: item.video || item.hint ? "ready" : "resolving" })), ...pending],
       locked: this.locked,
       error: this.error,
     };
@@ -233,12 +279,16 @@ export class ChannelPlayer {
 
   // -- inside ---------------------------------------------------------------
 
+  private item(source: TSource, addedBy: number, hint: TItem["hint"]): TItem {
+    return { id: crypto.randomUUID(), source, addedBy, hint, video: null, resolving: null, fetching: null, downloads: null, abort: new AbortController() };
+  }
+
   private assertAlive() {
-    if (this.destroyed) throw new UserError("This voice channel has closed");
+    if (this.destroyed) throw new UserError("error.closed");
   }
 
   private requireCurrent(): TCurrent {
-    if (!this.current) throw new UserError("Nothing is playing");
+    if (!this.current) throw new UserError("error.nothingPlaying");
     return this.current;
   }
 
@@ -247,7 +297,7 @@ export class ChannelPlayer {
     if (!this.destroyed) this.deps.changed(this);
   }
 
-  private setError(error: string | null) {
+  private setError(error: TMessage | null) {
     clearTimeout(this.errorTimer);
     this.error = error;
     if (error) {
@@ -258,14 +308,64 @@ export class ChannelPlayer {
     }
   }
 
+  /** Bun ends the whole server on a rejection nobody handles, so work left running logs its failures */
+  private background(task: Promise<unknown>) {
+    task.catch((error) => this.deps.log.error(`[player ${this.channelId}]`, errorText(error)));
+  }
+
   private report(error: unknown) {
     if (!(error instanceof UserError)) this.deps.log.error(`[player ${this.channelId}]`, errorText(error));
-    if (!this.destroyed) this.setError(userText(error));
+    if (!this.destroyed) this.setError(userMessage(error));
   }
 
   private position(current: TCurrent): number {
     if (current.state !== "playing" || !current.run) return current.base;
     return current.base + current.run.encoder.elapsed();
+  }
+
+  /** how much is downloaded, while it downloads */
+  private progress(item: TItem): number | null {
+    const files = item.downloads?.files;
+    if (!files || files.every((file) => file.done)) return null;
+    const totals = files.map((file) => (file.done ? file.bytes : file.total));
+    if (totals.some((total) => total === null)) return fraction(files[0]!);
+    // yt-dlp's totals can be estimates below what arrives
+    return Math.min(1, files.reduce((sum, file) => sum + file.bytes, 0) / totals.reduce<number>((sum, total) => sum + total!, 0));
+  }
+
+  /** the next thing to do: start the queue, or download what comes next */
+  private next() {
+    if (!this.current) this.background(this.advance());
+    else this.prefetch();
+  }
+
+  private addPlaylist(listId: string, userId: number) {
+    const pending: TPending = { id: crypto.randomUUID(), addedBy: userId, abort: new AbortController() };
+    this.pending.push(pending);
+    this.background((async () => {
+      try {
+        await this.deps.ready();
+        const entries = await this.deps.youtube.playlist(listId, pending.abort.signal);
+        if (!this.pending.includes(pending)) return;
+        this.pending.splice(this.pending.indexOf(pending), 1);
+        const limit = this.deps.settings().maxSeconds;
+        const fitting = entries.filter((entry) => !limit || entry.duration <= limit);
+        const added = fitting.slice(0, Math.max(0, MAX_QUEUE - this.queue.length - this.pending.length));
+        for (const entry of added) {
+          this.queue.push(this.item({ kind: "video", videoId: entry.videoId, start: 0 }, userId, { title: entry.title, duration: entry.duration }));
+        }
+        if (added.length < fitting.length) this.report(new UserError("error.queueFullSome", { count: added.length, total: fitting.length }));
+        else if (fitting.length < entries.length) this.report(new UserError("error.someTooLong", { minutes: minutes(limit) }));
+        else if (!fitting.length) this.report(new UserError("yt.playlistEmpty"));
+        this.next();
+        this.changed();
+      } catch (error) {
+        if (!this.pending.includes(pending)) return;
+        this.pending.splice(this.pending.indexOf(pending), 1);
+        this.report(error);
+        this.changed();
+      }
+    })());
   }
 
   /** looks the video up once, and checks it against the length limit */
@@ -275,7 +375,7 @@ export class ChannelPlayer {
       const settings = this.deps.settings();
       const video = await this.deps.youtube.resolve(item.source, settings.quality, item.abort.signal);
       if (!video.live && settings.maxSeconds > 0 && video.duration > settings.maxSeconds) {
-        throw new UserError(`Videos can be up to ${minutes(settings.maxSeconds)} minutes long`);
+        throw new UserError("error.tooLong", { minutes: minutes(settings.maxSeconds) });
       }
       item.video = video;
       this.changed();
@@ -284,40 +384,110 @@ export class ChannelPlayer {
     return item.resolving;
   }
 
-  /** downloads the video once; livestreams are read live instead */
-  private fetch(item: TItem): Promise<string | null> {
-    item.fetching ??= (async () => {
+  /**
+   * Downloads the video once: video and audio side by side into files that
+   * ffmpeg reads while they grow, or, without separate formats, one merged
+   * file. Livestreams are read live instead. Its failure ends the video, or
+   * drops it from the queue; `stopFetch` ends it quietly.
+   */
+  private fetch(item: TItem): void {
+    if (item.fetching) return;
+    const abort = new AbortController();
+    const signal = AbortSignal.any([item.abort.signal, abort.signal]);
+    const fetching: TFetch = { abort, dir: path.join(this.deps.cacheDir, item.id, String(++fetches)), done: Promise.resolve() };
+    item.fetching = fetching;
+    fetching.done = (async () => {
       const video = await this.resolve(item);
-      if (video.live) return null;
-      const dir = path.join(this.deps.cacheDir, item.id);
-      await mkdir(dir, { recursive: true });
-      let lastShown = 0;
-      const file = await this.deps.youtube.download(
-        video,
-        dir,
-        (fraction) => {
-          item.progress = fraction;
-          // a progress bar does not need every percent
-          if (fraction - lastShown >= 0.05) {
-            lastShown = fraction;
-            this.changed();
-          }
-        },
-        item.abort.signal,
-      );
-      item.file = file;
-      item.progress = null;
-      this.changed();
-      return file;
+      if (video.live) return;
+      await mkdir(fetching.dir, { recursive: true });
+      const free = await this.deps.disk.free(fetching.dir);
+      signal.throwIfAborted();
+      // checked and claimed in one step, so downloads starting together do not count the same space
+      const needed = sizeOf(video);
+      if (free !== null && free - this.deps.disk.reserved < needed + DISK_RESERVE) throw new UserError("error.disk");
+      this.deps.disk.reserved += needed;
+      try {
+        await this.download(item, fetching, video, signal);
+      } finally {
+        this.deps.disk.reserved -= needed;
+      }
     })();
-    return item.fetching;
+    fetching.done.catch((error) => {
+      // stopped because it is no longer next
+      if (item.fetching !== fetching) return;
+      const current = this.current;
+      if (current?.item === item) this.finish(current, error);
+      else this.dropQueued(item, error);
+    });
   }
 
-  /** the next video downloads while this one plays */
+  private async download(item: TItem, fetching: TFetch, video: TResolved, signal: AbortSignal) {
+    const dir = fetching.dir;
+    let lastShown = 0;
+    const tick = () => {
+      if (item.fetching !== fetching) return;
+      const progress = this.progress(item) ?? 1;
+      // a progress bar does not need every percent
+      if (progress - lastShown >= 0.02 || progress === 1) {
+        lastShown = progress;
+        this.changed();
+      }
+      if (this.current?.item === item) this.maybeStart(this.current);
+    };
+    if (video.parts) {
+      const { video: videoPart, audio: audioPart } = video.parts;
+      const files = [videoPart, audioPart].map((part, index): TDownload => ({
+        file: path.join(dir, `${index ? "audio" : "video"}.${part.ext}`),
+        bytes: 0,
+        total: part.size,
+        done: false,
+      }));
+      item.downloads = { separate: true, files };
+      await Promise.all(
+        [videoPart, audioPart].map((part, index) => {
+          const download = files[index]!;
+          return this.deps.youtube
+            .downloadPart(video, part, download.file!, (bytes, total) => {
+              download.bytes = bytes;
+              download.total = total ?? download.total;
+              tick();
+            }, signal)
+            .then(() => {
+              download.done = true;
+              tick();
+            });
+        }),
+      );
+    } else {
+      const download: TDownload = { file: null, bytes: 0, total: null, done: false };
+      item.downloads = { separate: false, files: [download] };
+      download.file = await this.deps.youtube.downloadMerged(video, dir, (bytes, total) => {
+        download.bytes = bytes;
+        download.total = total;
+        tick();
+      }, signal);
+      download.done = true;
+      tick();
+    }
+  }
+
+  /** only the next video downloads while one plays, after the one playing; one moved away from next stops */
   private prefetch() {
     const next = this.queue[0];
-    if (!this.current || !next || next.fetching) return;
-    this.fetch(next).catch((error) => this.dropQueued(next, error));
+    for (const item of this.queue) if (item !== next && item.fetching) this.stopFetch(item);
+    if (this.current?.item.fetching && next) this.fetch(next);
+  }
+
+  private stopFetch(item: TItem) {
+    const fetching = item.fetching!;
+    item.fetching = null;
+    item.downloads = null;
+    fetching.abort.abort();
+    void fetching.done
+      .catch(() => {})
+      .then(() => rm(fetching.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+      .catch(() => {});
+    this.changed();
   }
 
   private dropQueued(item: TItem, error: unknown) {
@@ -333,8 +503,9 @@ export class ChannelPlayer {
   /** aborts what the item is doing and deletes its download, once `after` (ffmpeg reading it) is done */
   private discard(item: TItem, after?: Promise<unknown>) {
     item.abort.abort();
-    const settled = Promise.allSettled([item.resolving, item.fetching, after]);
-    void settled.then(() => rm(path.join(this.deps.cacheDir, item.id), { recursive: true, force: true })).catch(() => {});
+    const settled = Promise.allSettled([item.resolving, item.fetching?.done, after]);
+    // on Windows, a killed download can hold its file a moment longer
+    void settled.then(() => rm(path.join(this.deps.cacheDir, item.id), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })).catch(() => {});
   }
 
   private async advance(): Promise<void> {
@@ -348,21 +519,21 @@ export class ChannelPlayer {
     }
     if (!this.deps.slotFree()) {
       this.queue.unshift(item);
-      this.report(new UserError("Too many videos are playing on this server"));
+      this.report(new UserError("error.slots"));
       this.changed();
       return;
     }
-    const current: TCurrent = { item, state: "loading", base: 0, run: null, attempt: 0, restarts: [], retried: false };
+    const current: TCurrent = { item, state: "loading", base: 0, run: null, attempt: 0, starting: null, restarts: [], retried: false };
     this.current = current;
     this.changed();
     try {
       const video = await this.resolve(item);
+      if (this.current !== current) return;
       current.base = video.start;
       this.output?.relabel(this.label(video));
-      await this.fetch(item);
-      if (this.current !== current) return;
+      this.fetch(item);
       this.prefetch();
-      if (current.state === "loading") this.startRun(current, current.base);
+      this.maybeStart(current);
     } catch (error) {
       if (this.current === current) this.finish(current, error);
     }
@@ -372,20 +543,34 @@ export class ChannelPlayer {
     return { title: video.title, bannerUrl: this.deps.thumbnail(video.videoId) };
   }
 
-  /** whether what it plays is there: the download, or a livestream's playlist */
-  private canStart(current: TCurrent): boolean {
-    const video = current.item.video;
-    return !!video && (video.live ? !!video.hls : !!current.item.file);
+  /** whether there is enough to play from `position`: the playlist of a livestream, or the download */
+  private canStart(item: TItem, position: number): boolean {
+    const video = item.video;
+    if (!video) return false;
+    if (video.live) return !!video.hls;
+    const downloads = item.downloads;
+    if (!downloads) return false;
+    if (downloads.files.every((file) => file.done)) return true;
+    if (!downloads.separate || video.duration <= 0) return false;
+    const needed = Math.min(1, (position + BUFFER_SECONDS) / video.duration);
+    return downloads.files.every((file) => file.bytes > 0 && fraction(file) >= needed);
+  }
+
+  /** starts playing when the current video is waiting for nothing but itself */
+  private maybeStart(current: TCurrent) {
+    if (this.current !== current || current.state !== "loading" || current.run || current.starting !== null) return;
+    if (this.canStart(current.item, current.base)) this.startRun(current, current.base);
   }
 
   /** a new ffmpeg with its own transports, from `position` */
   private startRun(current: TCurrent, position: number) {
     const attempt = ++current.attempt;
+    current.starting = attempt;
     current.base = position;
     void (async () => {
       const video = current.item.video!;
       const ffmpeg = this.deps.ffmpeg();
-      if (!ffmpeg) throw new UserError("ffmpeg isn't installed yet");
+      if (!ffmpeg) throw new UserError("error.ffmpeg");
       const quality = this.deps.settings().quality;
       this.output ??= this.deps.createOutput(this.channelId);
       const output = this.output;
@@ -394,14 +579,21 @@ export class ChannelPlayer {
         connection.close();
         return;
       }
+      const downloads = current.item.downloads;
+      const [first, second] = downloads?.files ?? [];
+      const input = video.live ? video.hls!.url : downloads!.separate ? { video: first!.file!, audio: second!.file! } : first!.file!;
+      const follow = !video.live && !!downloads?.files.some((file) => !file.done);
       let encoder: TEncoder;
       try {
         encoder = this.deps.encode(
           {
             ffmpeg,
-            input: video.live ? video.hls!.url : current.item.file!,
+            input,
             live: video.live,
+            follow,
             start: position,
+            // a little past the end: durations are rounded, and ffmpeg stops at the real one
+            length: !video.live && video.duration > 0 ? video.duration - position + 1 : undefined,
             quality,
             headers: video.hls?.headers,
             video: connection.video,
@@ -422,6 +614,7 @@ export class ChannelPlayer {
               current.state = "playing";
               this.changed();
             },
+            growing: follow ? () => downloads!.files.some((file) => !file.done) : undefined,
           },
         );
       } catch (error) {
@@ -431,15 +624,21 @@ export class ChannelPlayer {
       }
       const run: TRun = { connection, onAir: false, encoder };
       current.run = run;
-      void encoder.exited.then((exit) => this.ended(current, run, exit));
-    })().catch((error) => {
-      if (this.current === current && current.attempt === attempt) this.finish(current, error);
-    });
+      this.background(encoder.exited.then((exit) => this.ended(current, run, exit)));
+    })()
+      .catch((error) => {
+        if (this.current === current && current.attempt === attempt) this.finish(current, error);
+      })
+      .finally(() => {
+        if (current.starting === attempt) current.starting = null;
+      })
+      .catch((error) => this.deps.log.error(`[player ${this.channelId}]`, errorText(error)));
   }
 
   /** stops the current ffmpeg on purpose, and any start still on its way; the exit is then ignored */
   private stopRun(current: TCurrent): Promise<void> {
     current.attempt++;
+    current.starting = null;
     const run = current.run;
     current.run = null;
     return run ? run.encoder.stop() : Promise.resolve();
@@ -452,33 +651,36 @@ export class ChannelPlayer {
     if (current.run !== run || this.current !== current) return;
     current.run = null;
     const video = current.item.video!;
-    if (exit.code !== 0) this.deps.log.error(`[ffmpeg ${this.channelId}] exit ${exit.code}: ${exit.error.slice(-300)}`);
+    const position = current.base + run.encoder.elapsed();
+    const atEnd = !video.live && (video.duration === 0 || position >= video.duration - 5);
+    if (exit.code !== 0 && !atEnd) this.deps.log.error(`[ffmpeg ${this.channelId}] exit ${exit.code}: ${exit.error.slice(-300)}`);
 
     if (video.live) {
       const now = this.deps.now();
       current.restarts = current.restarts.filter((at) => now - at < LIVE_RESTART_WINDOW_MS);
       if (current.restarts.length >= LIVE_RESTARTS) {
-        this.finish(current, new UserError("The livestream keeps dropping out"));
+        this.finish(current, new UserError("error.liveDropping"));
         return;
       }
       current.restarts.push(now);
       current.state = "loading";
       this.changed();
-      void this.restartLive(current);
+      this.background(this.restartLive(current));
       return;
     }
 
-    const position = current.base + run.encoder.elapsed();
-    const atEnd = video.duration === 0 || position >= video.duration - 5;
+    // a run that played a while earns its retry back
+    if (run.encoder.elapsed() >= RETRY_AFTER_SECONDS) current.retried = false;
     if (exit.code === 0 || atEnd) {
       this.finish(current, null);
     } else if (!current.retried) {
       current.retried = true;
       current.state = "loading";
+      current.base = Math.floor(position);
       this.changed();
-      this.startRun(current, Math.floor(position));
+      this.maybeStart(current);
     } else {
-      this.finish(current, new UserError("Playback failed"));
+      this.finish(current, new UserError("error.playback"));
     }
   }
 
@@ -492,7 +694,8 @@ export class ChannelPlayer {
         return;
       }
       current.item.video = fresh;
-      this.startRun(current, 0);
+      current.base = 0;
+      this.maybeStart(current);
     } catch (error) {
       if (this.current === current) this.finish(current, error);
     }
@@ -504,7 +707,7 @@ export class ChannelPlayer {
     this.current = null;
     this.discard(current.item, this.stopRun(current));
     if (error) this.report(error);
-    void this.advance();
+    this.background(this.advance());
     this.changed();
   }
 

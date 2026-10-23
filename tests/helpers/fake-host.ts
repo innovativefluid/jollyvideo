@@ -117,32 +117,56 @@ export const script = (dir: string, name: string, body: string): string => {
 };
 
 /**
- * A yt-dlp that knows one video. `-j` prints its info; a download copies
- * `$JV_FIXTURE` (or writes a placeholder) and prints the file's path.
+ * A yt-dlp that knows one video (or playlist), as a Bun script.
+ *
+ * - `-j` prints `info`, `-J` prints `info` with its `entries` (a playlist).
+ *   `info.byQuery` changes it for queries containing a word: `{ word: { id, title } }`.
+ * - `-f <id> -o <file>` downloads one format: `$JV_FIXTURE_VIDEO` for a video
+ *   format, `$JV_FIXTURE_AUDIO` for an audio one, or a placeholder. With
+ *   `$JV_RATE` (bytes per second) the file grows at that rate, like a real
+ *   download.
+ * - an `-o` with a template merges: `$JV_FIXTURE` (or a placeholder) into
+ *   `video.mkv`, and prints its path.
  */
-export const fakeYtDlp = (dir: string, info: object): string =>
-  script(
-    dir,
-    "yt-dlp",
+export const fakeYtDlp = (dir: string, info: { formats?: Record<string, unknown>[] } & Record<string, unknown>): string => {
+  const program = path.join(dir, "fake-yt-dlp.ts");
+  writeFileSync(
+    program,
     `
-out=""; mode=download
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -j) mode=json ;;
-    -o) out="$2"; shift ;;
-  esac
-  shift
-done
-if [ "$mode" = json ]; then
-  cat <<'JSON'
-${JSON.stringify(info)}
-JSON
-  exit 0
-fi
-file="$(dirname "$out")/video.mkv"
-if [ -n "$JV_FIXTURE" ]; then cp "$JV_FIXTURE" "$file"; else echo placeholder > "$file"; fi
-echo "[jv] 50 100 NA"
-echo "[jv] 100 100 NA"
-echo "$file"
+import { closeSync, copyFileSync, openSync, writeFileSync, writeSync } from "fs";
+import path from "path";
+const info = ${JSON.stringify(info)};
+const args = process.argv.slice(2);
+const value = (flag) => { const at = args.indexOf(flag); return at === -1 ? undefined : args[at + 1]; };
+if (args.includes("-j") || args.includes("-J")) {
+  const query = args.at(-1);
+  const match = Object.entries(info.byQuery ?? {}).find(([word]) => query.includes(word));
+  console.log(JSON.stringify(match ? { ...info, ...match[1] } : info));
+  process.exit(0);
+}
+const out = value("-o");
+const format = info.formats?.find((f) => f.format_id === value("-f")?.split("/")[0]);
+if (!out.includes("%(")) {
+  const source = format?.vcodec && format.vcodec !== "none" ? process.env.JV_FIXTURE_VIDEO : process.env.JV_FIXTURE_AUDIO;
+  const bytes = source ? await Bun.file(source).bytes() : new TextEncoder().encode("placeholder");
+  const rate = Number(process.env.JV_RATE ?? 0);
+  const fd = openSync(out, "w");
+  const step = rate ? Math.max(1, Math.floor(rate / 10)) : bytes.length;
+  for (let at = 0; at < bytes.length; at += step) {
+    writeSync(fd, bytes.subarray(at, Math.min(bytes.length, at + step)));
+    console.log("[jv] " + Math.min(bytes.length, at + step) + " " + bytes.length + " NA");
+    if (rate) await Bun.sleep(100);
+  }
+  closeSync(fd);
+  process.exit(0);
+}
+const file = path.join(path.dirname(out), "video.mkv");
+if (process.env.JV_FIXTURE) copyFileSync(process.env.JV_FIXTURE, file);
+else writeFileSync(file, "placeholder");
+console.log("[jv] 50 100 NA");
+console.log("[jv] 100 100 NA");
+console.log(file);
 `,
   );
+  return script(dir, "yt-dlp", `exec "${process.execPath}" "${program}" "$@"`);
+};

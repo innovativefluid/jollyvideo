@@ -3,7 +3,7 @@
  * it. Needs an ffmpeg with libx264 and libopus: JOLLYVIDEO_FFMPEG, or one on PATH.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import * as mediasoup from "mediasoup";
 import type { Producer, Router, Worker } from "mediasoup/types";
 import os from "os";
@@ -55,24 +55,33 @@ const recordingVoice = () => {
   return { voice, streams };
 };
 
+type TPlayExtra = { live?: boolean; start?: number; follow?: boolean; length?: number; growing?: () => boolean };
+
 /** plays `input` until ffmpeg has sent media, and returns what is on air */
-const play = async (quality: TQuality, input: string, extra: { live?: boolean; start?: number } = {}) => {
+const play = async (quality: TQuality, input: string | { video: string; audio: string }, extra: TPlayExtra = {}) => {
   const { voice, streams } = recordingVoice();
   const output = createOutput(voice, 1, "test");
   const connection = await output.connect(h264Level(quality).profileLevelId);
   let onAir!: () => void;
   const started = new Promise<void>((resolve) => (onAir = resolve));
   const encoder: TEncoder = startEncoder(
-    { ffmpeg, input, live: extra.live ?? false, start: extra.start ?? 0, quality, video: connection.video, audio: connection.audio },
+    { ffmpeg, input, live: extra.live ?? false, follow: extra.follow, start: extra.start ?? 0, length: extra.length, quality, video: connection.video, audio: connection.audio },
     {
       started: () => {
         output.publish(connection, { title: "t" });
         onAir();
       },
+      growing: extra.growing,
     },
   );
   await Promise.race([started, encoder.exited.then((exit) => Promise.reject(new Error(`ffmpeg exited ${exit.code}: ${exit.error}`)))]);
   return { output, encoder, stream: streams[0]!, streams };
+};
+
+/** checks every `every` ms until `check` holds or `ms` have passed */
+const until = async (check: () => boolean, ms: number, every = 100) => {
+  for (const end = Date.now() + ms; !check() && Date.now() < end; ) await Bun.sleep(every);
+  return check();
 };
 
 const measure = async (producer: Producer, ms: number) => {
@@ -213,31 +222,103 @@ describe("a livestream", () => {
 });
 
 describe("the whole plugin", () => {
-  it("downloads with yt-dlp and plays into the voice channel", async () => {
-    process.env.JV_FIXTURE = fixture;
-    process.env.JOLLYVIDEO_YT_DLP = fakeYtDlp(dir, {
-      id: "aqz-KE-bpKQ",
-      title: "Fixture",
-      duration: 30,
-      formats: [],
-    });
-    process.env.JOLLYVIDEO_FFMPEG = ffmpeg;
-    const host = fakeHost({ router, dataPath: path.join(dir, "data") });
+  const withPlugin = async (info: Parameters<typeof fakeYtDlp>[1], env: Record<string, string>, body: (host: ReturnType<typeof fakeHost>) => Promise<void>) => {
+    Object.assign(process.env, env, { JOLLYVIDEO_YT_DLP: fakeYtDlp(dir, info), JOLLYVIDEO_FFMPEG: ffmpeg });
+    const host = fakeHost({ router, dataPath: path.join(dir, `data-${crypto.randomUUID()}`) });
     try {
       await onLoad(host.ctx as never);
+      await body(host);
+    } finally {
+      await onUnload();
+      for (const key of [...Object.keys(env), "JOLLYVIDEO_YT_DLP", "JOLLYVIDEO_FFMPEG"]) delete process.env[key];
+    }
+  };
+  const latest = (host: ReturnType<typeof fakeHost>) => host.pushes.at(-1)?.data as TPlayer | undefined;
+
+  it("downloads a merged file with yt-dlp when there are no separate formats, and plays it", async () => {
+    await withPlugin({ id: "aqz-KE-bpKQ", title: "Fixture", duration: 30, formats: [] }, { JV_FIXTURE: fixture }, async (host) => {
       await host.action("add", 1, 3, { query: "fixture" });
-      for (let i = 0; i < 100 && (host.pushes.at(-1)?.data as TPlayer | undefined)?.now?.state !== "playing"; i++) await Bun.sleep(100);
-      expect((host.pushes.at(-1)?.data as TPlayer).now).toMatchObject({ title: "Fixture", state: "playing" });
+      expect(await until(() => latest(host)?.now?.state === "playing", 10_000)).toBe(true);
+      expect(latest(host)!.now).toMatchObject({ title: "Fixture" });
       const producers = host.streams[0]!.options.producers as { audio: Producer; video: Producer };
       const video = await measure(producers.video, 1500);
       expect(video.frames).toBeGreaterThan(30);
       await host.command("watch-stop", 1, 3);
       expect(host.streams[0]!.removed).toBe(true);
-    } finally {
-      await onUnload();
-      delete process.env.JV_FIXTURE;
-      delete process.env.JOLLYVIDEO_YT_DLP;
-      delete process.env.JOLLYVIDEO_FFMPEG;
-    }
+    });
   }, 30_000);
+
+  it("starts playing while video and audio still download, and ends by itself", async () => {
+    // YouTube's separate formats: fragmented MP4 video, WebM audio
+    const video = path.join(dir, "part-video.mp4");
+    const audio = path.join(dir, "part-audio.webm");
+    await run(["-i", fixture, "-t", "25", "-an", "-c:v", "copy", "-f", "mp4", "-movflags", "+dash+global_sidx", video]);
+    await run(["-i", fixture, "-t", "25", "-vn", "-c:a", "copy", "-f", "webm", "-dash", "1", "-cues_to_front", "1", audio]);
+    const videoSize = Bun.file(video).size;
+    const info = {
+      id: "aqz-KE-bpKQ",
+      title: "Growing",
+      duration: 25,
+      formats: [
+        { format_id: "v", ext: "mp4", vcodec: "avc1.64002a", acodec: "none", height: 1080, fps: 60, protocol: "https", filesize: videoSize },
+        { format_id: "a", ext: "webm", vcodec: "none", acodec: "opus", abr: 128, protocol: "https", filesize: Bun.file(audio).size },
+      ],
+    };
+    // the whole video takes 8 seconds to arrive
+    await withPlugin(info, { JV_FIXTURE_VIDEO: video, JV_FIXTURE_AUDIO: audio, JV_RATE: String(Math.ceil(videoSize / 8)) }, async (host) => {
+      await host.action("add", 1, 4, { query: "growing" });
+      expect(await until(() => latest(host)?.now?.state === "playing", 15_000)).toBe(true);
+      const playing = latest(host)!.now!;
+      // 20 of 25 seconds were needed, not the whole file
+      expect(playing.progress).toBeGreaterThan(0.75);
+      expect(playing.progress).toBeLessThan(1);
+      const producers = host.streams[0]!.options.producers as { audio: Producer; video: Producer };
+      const frames = await measure(producers.video, 2000);
+      expect(frames.frames).toBeGreaterThan(40);
+      // plays to the end while the rest arrives, then takes the stream down
+      expect(await until(() => host.streams[0]!.removed, 40_000)).toBe(true);
+      expect(await until(() => latest(host)?.now === null, 2_000)).toBe(true);
+      expect(latest(host)!.error).toBeNull();
+    });
+  }, 70_000);
+});
+
+describe("files still downloading", () => {
+  it("seek into them, wait at their end while they grow, and stop at the given length", async () => {
+    // like YouTube's separate formats: fragmented MP4 video and WebM audio, each with its index up front
+    const whole = { video: path.join(dir, "whole-video.mp4"), audio: path.join(dir, "whole-audio.webm") };
+    await run(["-i", fixture, "-t", "25", "-an", "-c:v", "copy", "-f", "mp4", "-movflags", "+dash+global_sidx", whole.video]);
+    await run(["-i", fixture, "-t", "25", "-vn", "-c:a", "copy", "-f", "webm", "-dash", "1", "-cues_to_front", "1", whole.audio]);
+    const bytes = { video: await Bun.file(whole.video).bytes(), audio: await Bun.file(whole.audio).bytes() };
+    const growing = { video: path.join(dir, "growing-video.mp4"), audio: path.join(dir, "growing-audio.webm") };
+    // the first 10 of 25 seconds
+    const cut = (data: Uint8Array) => Math.floor(data.length * 0.4);
+    writeFileSync(growing.video, bytes.video.subarray(0, cut(bytes.video)));
+    writeFileSync(growing.audio, bytes.audio.subarray(0, cut(bytes.audio)));
+    let downloading = true;
+
+    const { encoder, stream, output } = await play(QUALITIES["480p30"]!, growing, { start: 5, follow: true, length: 7, growing: () => downloading });
+    const video = await measure(stream.producers.video!, 1500);
+    expect(video.frames).toBeGreaterThan(20);
+
+    // runs out at about 5 seconds, close to its length of 7: it waits instead of ending there
+    let last = -1;
+    await until(() => {
+      const moved = encoder.elapsed() !== last;
+      last = encoder.elapsed();
+      return !moved;
+    }, 15_000, 1000);
+    expect(encoder.elapsed()).toBeLessThan(6.5);
+    const early = await Promise.race([encoder.exited.then(() => true), Bun.sleep(4000).then(() => false)]);
+    expect(early).toBe(false);
+
+    // the rest arrives: it goes on, and stops at 7 seconds by itself
+    appendFileSync(growing.video, bytes.video.subarray(cut(bytes.video)));
+    appendFileSync(growing.audio, bytes.audio.subarray(cut(bytes.audio)));
+    downloading = false;
+    const exit = await Promise.race([encoder.exited, Bun.sleep(8000).then(() => null)]);
+    output.remove();
+    expect(exit?.code).toBe(0);
+    expect(encoder.elapsed()).toBeGreaterThanOrEqual(6.5);
+  }, 60_000);
 });

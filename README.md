@@ -1,46 +1,43 @@
 # Jollyvideo
 
-Watch YouTube videos and livestreams together in Sharkord voice channels.
+Watch YouTube together in Sharkord voice channels.
+
+![Jollyvideo playing a video in a Sharkord voice channel](docs/screenshot.png)
 
 ## Install
 
-Install `jollyvideo-<version>.tar.gz` from the releases with Sharkord's plugin installer, or unpack `jollyvideo-<version>.zip` into the server's plugins folder. Then enable the plugin.
+1. Download `jollyvideo-<version>.zip` from [Releases](https://github.com/innovativefluid/jollyvideo/releases/latest).
+2. Unpack it into Sharkord's `plugins` folder (`~/.config/sharkord/plugins`, in Docker `/home/bun/.config/sharkord/plugins`) and restart Sharkord.
+3. Turn it on under Server settings → Plugins.
 
-On first start the server downloads yt-dlp and ffmpeg into the plugin's data folder and checks them against their SHA-256. A copy on `PATH`, or one set with `JOLLYVIDEO_YT_DLP` / `JOLLYVIDEO_FFMPEG`, is used instead.
+On first start the server downloads yt-dlp and ffmpeg, checked against their SHA-256.
 
 ## Use
 
-Join a voice channel, click the popcorn button next to the camera button, and paste a YouTube link or type a search.
+Join a voice channel and click the popcorn button next to the camera button. Paste a YouTube video, playlist or livestream link, or type a search. A video starts once its first 20 seconds have downloaded.
 
-Moderators (anyone with *Move members*) can lock the player. While it is locked, only they can add or control videos.
+Drag queued videos to reorder them. Moderators (*Move members*) can lock the player so only they control it.
 
 Commands: `/watch`, `/watch-skip`, `/watch-stop`, `/watch-lock`, `/watch-update`.
 
 ## Settings
 
-- **Video quality**: 480p to 1080p, 30 or 60 fps. Each playing video keeps about one CPU core busy.
-- **Longest video**: in minutes, 0 for no limit.
-- **Videos at once**: across all voice channels.
-- **Update yt-dlp weekly**
+Video quality (480p to 1080p, 30 or 60 fps), longest video, videos at once across the server, and weekly yt-dlp updates. Each playing video keeps about one CPU core busy.
 
-If YouTube asks the server to sign in, put a `cookies.txt` into the plugin's `bin` data folder.
+If YouTube asks the server to sign in, put a `cookies.txt` into `plugin-data/jollyvideo/bin` in Sharkord's folder.
 
 ## Development
 
 ```sh
 bun install
-bun run sharkord       # Sharkord's source: for the class check and the preview
+bun run sharkord   # Sharkord's source, for the class check, preview and end-to-end test
 bun run check
-bun run test
-bun run test:media     # needs ffmpeg (JOLLYVIDEO_FFMPEG or PATH), and yt-dlp for its part
-bun run build          # dist/
-bun run test:package
-bun run preview        # the panel in Sharkord's styles, without a server
+bun run test       # also test:media, test:e2e
+bun run build
+bun run preview    # the panel with Sharkord's styles, without a server
 ```
 
-The client may only use classes that Sharkord's stylesheet has. They all live in `src/client/classes.ts`, and `bun run check` checks them against Sharkord's source.
-
-To release: GitHub → Actions → **Release** → Run workflow with the version from `manifest.json`. It tags, tests, builds and opens a draft release to publish.
+Releases: Actions → Release → Run workflow.
 
 ## License
 

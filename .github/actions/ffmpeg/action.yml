@@ -1,0 +1,12 @@
+name: ffmpeg
+description: The ffmpeg build the plugin downloads on servers, checked against its SHA-256; sets JOLLYVIDEO_FFMPEG
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        curl -fsSL -o "$RUNNER_TEMP/ffmpeg.tar.gz" https://github.com/diogomartino/plugin-binaries/releases/download/0.0.1/ffmpeg-linux-x64.tar.gz
+        echo "da7f697fc9eaf4c878d4fc7d2dde589538b6856467aa81890afaab0a28114b42  $RUNNER_TEMP/ffmpeg.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/ffmpeg.tar.gz" -C "$RUNNER_TEMP"
+        chmod +x "$RUNNER_TEMP/ffmpeg-linux-x64"
+        echo "JOLLYVIDEO_FFMPEG=$RUNNER_TEMP/ffmpeg-linux-x64" >> "$GITHUB_ENV"

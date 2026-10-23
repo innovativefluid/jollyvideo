@@ -2,6 +2,7 @@
  * What the server and the client half agree on: the actions the panel calls,
  * the chat commands, and the state pushed to everyone in a voice channel.
  */
+import type { TMessage } from "./i18n";
 
 export type TVideo = {
   /** queue entry id, unique per add */
@@ -19,13 +20,15 @@ export type TQueueEntry = TVideo & {
   state: "resolving" | "ready";
   /** download progress 0..1 while prefetching */
   progress: number | null;
+  /** a playlist still being looked up; becomes its videos */
+  playlist?: true;
 };
 
 export type TNowPlaying = TVideo & {
   state: "loading" | "playing" | "paused";
   /** seconds into the video when this state was produced */
   position: number;
-  /** download progress 0..1 while loading */
+  /** how much of the video is downloaded, 0..1, while it downloads */
   progress: number | null;
 };
 
@@ -37,7 +40,7 @@ export type TPlayer = {
   queue: TQueueEntry[];
   /** only moderators control playback while locked */
   locked: boolean;
-  error: string | null;
+  error: TMessage | null;
 };
 
 export type TViewer = {
@@ -50,6 +53,8 @@ export type TControl =
   | { op: "pause" | "resume" | "skip" | "stop" | "clear" }
   | { op: "seek"; position: number }
   | { op: "remove"; id: string }
+  /** to: the queue index the entry ends up at */
+  | { op: "move"; id: string; to: number }
   | { op: "lock"; locked: boolean };
 
 export type TJollyvideo = {

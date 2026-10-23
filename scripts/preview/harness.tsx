@@ -45,11 +45,11 @@ const queue: TQueueEntry[] = [
 
 const scenarios: Record<string, TViewer> = {
   empty: { player: { channelId: 1, rev: 1, now: null, queue: [], locked: false, error: null }, canModerate: false },
-  playing: { player: { channelId: 1, rev: 1, now: now(), queue, locked: false, error: null }, canModerate: false },
+  playing: { player: { channelId: 1, rev: 1, now: now({ progress: 0.62 }), queue, locked: false, error: null }, canModerate: false },
   live: { player: { channelId: 1, rev: 1, now: now({ title: "lofi hip hop radio 📚 - beats to relax/study to", live: true, duration: 0, thumbnail: thumbnail(280) }), queue: [], locked: false, error: null }, canModerate: false },
   loading: { player: { channelId: 1, rev: 1, now: now({ state: "loading", progress: 0.42, position: 0 }), queue: [], locked: false, error: null }, canModerate: false },
   locked: { player: { channelId: 1, rev: 1, now: now({ state: "paused" }), queue: queue.slice(0, 2), locked: true, error: null }, canModerate: false },
-  moderator: { player: { channelId: 1, rev: 1, now: now(), queue: queue.slice(0, 1), locked: true, error: "This video is private" }, canModerate: true },
+  moderator: { player: { channelId: 1, rev: 1, now: now(), queue: queue.slice(0, 1), locked: true, error: { key: "yt.private" } }, canModerate: true },
 };
 
 let viewer: TViewer = structuredClone(scenarios[scenario] ?? scenarios.playing!);
@@ -67,6 +67,11 @@ const control = (op: TControl) => {
   if (op.op === "seek" && player.now) player.now.position = op.position;
   if (op.op === "lock") player.locked = op.locked;
   if (op.op === "remove") player.queue = player.queue.filter((entry) => entry.id !== op.id);
+  if (op.op === "move") {
+    const from = player.queue.findIndex((entry) => entry.id === op.id);
+    const [entry] = player.queue.splice(from, 1);
+    player.queue.splice(op.to, 0, entry!);
+  }
   if (op.op === "clear") player.queue = [];
   if (op.op === "stop") Object.assign(player, { now: null, queue: [] });
   if (op.op === "skip") {

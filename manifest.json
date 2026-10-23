@@ -4,5 +4,6 @@
   "author": "innovativefluid",
   "description": "Watch YouTube videos and livestreams together in voice channels",
   "sdkVersion": 2,
-  "version": "0.2.0"
+  "version": "0.3.0",
+  "homepage": "https://github.com/innovativefluid/jollyvideo"
 }

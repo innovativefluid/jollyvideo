@@ -4,6 +4,7 @@ export type TRunResult = { code: number; stdout: string; stderr: string };
 
 export type TRunOptions = {
   env?: Record<string, string | undefined>;
+  cwd?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** called for every stdout line; stdout is then not collected */
@@ -82,6 +83,7 @@ export const run = async (cmd: string[], options: TRunOptions = {}): Promise<TRu
   options.signal?.throwIfAborted();
   const child = Bun.spawn(cmd, {
     env: options.env ?? process.env,
+    cwd: options.cwd,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

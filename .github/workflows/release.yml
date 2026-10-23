@@ -65,7 +65,7 @@ jobs:
         run: |
           version="${{ inputs.version }}"
           {
-            echo "**Install:** \`jollyvideo-$version.tar.gz\` with Sharkord's plugin installer, or unpack \`jollyvideo-$version.zip\` into the server's plugins folder. The \`.sha256\` files hold the checksums."
+            echo "**Install:** unpack \`jollyvideo-$version.zip\` into Sharkord's \`plugins\` folder, restart Sharkord and turn the plugin on (see the README). The \`.sha256\` files hold the checksums."
             echo
             echo "## What's new"
             echo

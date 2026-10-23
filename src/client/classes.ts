@@ -31,6 +31,8 @@ export const cls = {
   slider: "relative flex w-full touch-none items-center select-none data-[disabled]:opacity-50",
   sliderTrack: "bg-muted relative grow overflow-hidden rounded-full data-[orientation=horizontal]:h-1.5 data-[orientation=horizontal]:w-full",
   sliderRange: "bg-primary absolute data-[orientation=horizontal]:h-full",
+  /** how much is downloaded, under the range */
+  sliderBuffered: "bg-primary/20 absolute h-full",
   sliderThumb:
     "border-primary ring-ring/50 block size-4 shrink-0 rounded-full border bg-white shadow-sm transition-[color,box-shadow] hover:ring-4 focus-visible:ring-4 focus-visible:outline-hidden absolute",
 
@@ -45,7 +47,11 @@ export const cls = {
   title: "text-sm font-medium leading-tight line-clamp-2 break-words",
   meta: "text-xs text-muted-foreground",
   queue: "flex flex-col gap-1 border-t pt-3",
-  queueRow: "flex items-center gap-2 min-w-0",
+  queueRow: "flex items-center gap-2 min-w-0 rounded-sm",
+  queueRowDragging: "flex items-center gap-2 min-w-0 rounded-sm bg-accent shadow-sm",
+  /** the handle a queued video is dragged by */
+  grip: `${BUTTON} rounded-md transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 size-6 cursor-grab touch-none text-muted-foreground`,
+  queueFooter: "flex justify-end",
   queueTitle: "flex-1 truncate text-sm",
   queueMeta: "w-10 shrink-0 text-xs text-muted-foreground",
   /** where a non-moderator sees that the player is locked */

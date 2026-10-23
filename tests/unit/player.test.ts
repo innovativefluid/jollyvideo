@@ -1,13 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import type { TEncodeOptions, TExit } from "../../src/server/encoder";
+import type { TEncodeOptions, TEncoderEvents, TExit } from "../../src/server/encoder";
 import { UserError } from "../../src/server/errors";
 import type { TConnection, TLabel } from "../../src/server/output";
 import { ChannelPlayer, type TPlayerDeps } from "../../src/server/player";
 import { QUALITIES, type TSettings } from "../../src/server/settings";
-import type { TResolved, TSource } from "../../src/server/youtube";
+import type { TPart, TPlaylistEntry, TProgress, TResolved, TSource } from "../../src/server/youtube";
 
 /** lets the player's promises, and its file system calls, settle */
 const flush = async () => {
@@ -29,6 +29,8 @@ const deferred = <T>() => {
   return { promise, resolve, reject };
 };
 
+const PARTS = { video: { formatId: "v", format: "v/bv", ext: "mp4", size: 100 }, audio: { formatId: "a", format: "a/ba", ext: "webm", size: 10 } };
+
 const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResolved => ({
   videoId: id.padEnd(11, "x"),
   title: `Video ${id}`,
@@ -36,55 +38,78 @@ const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResol
   live: false,
   start: 0,
   url: `https://www.youtube.com/watch?v=${id}`,
-  format: "136+251/b",
+  parts: PARTS,
+  format: "bv*+ba/b",
   fps: 30,
   ...extra,
 });
-const live = (id: string): TResolved => ({ ...vod(id, 0), live: true, hls: { url: `https://m/${id}.m3u8`, headers: {} } });
+const live = (id: string): TResolved => ({ ...vod(id, 0), live: true, parts: null, hls: { url: `https://m/${id}.m3u8`, headers: {} } });
+
+type TFakeDownload = { video: TResolved; part: TPart | null; file: string; progress: TProgress; signal: AbortSignal; done: ReturnType<typeof deferred<string>> };
 
 type TFakeEncoder = {
   options: TEncodeOptions;
+  events: TEncoderEvents;
   start(): void;
   elapsed: number;
   exit(code: number): void;
   stopped: boolean;
 };
 
-const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Partial<TSettings> = {}) => {
+const keyOf = (source: TSource) => (source.kind === "search" ? source.text : source.kind === "video" ? source.videoId : source.kind === "playlist" ? source.listId : source.url);
+
+const cleanup: string[] = [];
+afterEach(() => {
+  for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+const setup = (videos: Record<string, TResolved | Error>, options: { settings?: Partial<TSettings>; playlists?: Record<string, TPlaylistEntry[]> } = {}) => {
   const cacheDir = mkdtempSync(path.join(os.tmpdir(), "jv-player-"));
+  cleanup.push(cacheDir);
   const encoders: TFakeEncoder[] = [];
-  const downloads: { video: TResolved; signal: AbortSignal; done: ReturnType<typeof deferred<string>> }[] = [];
+  const downloads: TFakeDownload[] = [];
   const resolves: string[] = [];
   const published: TLabel[] = [];
   const connections: (TConnection & { closed: boolean })[] = [];
+  const playlistLookups: { listId: string; signal: AbortSignal; done: ReturnType<typeof deferred<TPlaylistEntry[]>> }[] = [];
   let removed = 0;
   let slots = true;
   let freed = 0;
+  let free: number | null = null;
   let encodeError: Error | null = null;
   let clock = 0;
   const errors: unknown[] = [];
 
+  const download = (video: TResolved, part: TPart | null, file: string, progress: TProgress, signal: AbortSignal) => {
+    const done = deferred<string>();
+    signal.addEventListener("abort", () => done.reject(new Error("aborted")));
+    downloads.push({ video, part, file, progress, signal, done });
+    return done.promise;
+  };
+
   const deps: TPlayerDeps = {
-    settings: () => ({ quality: QUALITIES["720p30"]!, maxSeconds: 3600, maxStreams: 2, updateYtDlp: false, ...settingsOverride }),
+    settings: () => ({ quality: QUALITIES["720p30"]!, maxSeconds: 3600, maxStreams: 2, updateYtDlp: false, ...options.settings }),
     ready: async () => {},
     ffmpeg: () => "/ffmpeg",
     cacheDir,
+    disk: { free: async () => free, reserved: 0 },
     youtube: {
-      async resolve(source: TSource) {
-        const key = source.kind === "search" ? source.text : source.kind === "video" ? source.videoId : source.url;
+      async resolve(source) {
+        const key = keyOf(source);
         resolves.push(key);
         const found = videos[key];
-        if (!found) throw new UserError("Nothing found");
+        if (!found) throw new UserError("yt.nothingFound");
         if (found instanceof Error) throw found;
-        return { ...found };
+        return structuredClone(found);
       },
-      download(video, _dir, onProgress, signal) {
-        const done = deferred<string>();
+      playlist(listId, signal) {
+        const done = deferred<TPlaylistEntry[]>();
         signal.addEventListener("abort", () => done.reject(new Error("aborted")));
-        downloads.push({ video, signal, done });
-        onProgress(0.5);
+        playlistLookups.push({ listId, signal, done });
         return done.promise;
       },
+      downloadPart: async (video, part, file, progress, signal) => void (await download(video, part, file, progress, signal)),
+      downloadMerged: (video, dir, progress, signal) => download(video, null, path.join(dir, "merged.mkv"), progress, signal),
     },
     createOutput: () => ({
       async connect() {
@@ -113,6 +138,7 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
       const exited = deferred<TExit>();
       const fake: TFakeEncoder = {
         options,
+        events,
         elapsed: 0,
         stopped: false,
         start: () => events.started(),
@@ -136,6 +162,8 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
     now: () => clock,
   };
   const player = new ChannelPlayer(7, deps);
+  const of = (id: string) => downloads.filter((d) => d.video.title === `Video ${id}`);
+
   return {
     player,
     encoders,
@@ -145,75 +173,108 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
     connections,
     errors,
     cacheDir,
+    playlistLookups,
+    of,
     removed: () => removed,
-    setSlots: (value: boolean) => (slots = value),
     freed: () => freed,
+    setSlots: (value: boolean) => (slots = value),
+    setFree: (bytes: number | null) => (free = bytes),
     failEncode: (error: Error | null) => (encodeError = error),
     tick: (ms: number) => (clock += ms),
-    /** finishes the download of video `id`, into file<id>.mkv */
-    downloaded: async (id: string) => {
-      await waitFor(() => downloads.some((d) => d.video.title === `Video ${id}`));
-      downloads.find((d) => d.video.title === `Video ${id}`)!.done.resolve(path.join(cacheDir, `file${id}.mkv`));
+    /** video `id` has downloaded this much (0..1) of each of its files */
+    grow: async (id: string, fraction: number) => {
+      await waitFor(() => of(id).length > 0);
+      for (const d of of(id)) d.progress(fraction * (d.part?.size ?? 100), d.part?.size ?? 100);
       await flush();
     },
-    download: (id: string) => downloads.find((d) => d.video.title === `Video ${id}`),
+    /** video `id` has downloaded completely */
+    downloaded: async (id: string) => {
+      await waitFor(() => of(id).length > 0);
+      for (const d of of(id)) {
+        d.progress(d.part?.size ?? 100, d.part?.size ?? 100);
+        d.done.resolve(d.file);
+      }
+      await flush();
+    },
   };
 };
 
-let cleanup: string[] = [];
-beforeEach(() => {
-  cleanup = [];
-});
-afterEach(() => {
-  for (const dir of cleanup) rmSync(dir, { recursive: true, force: true });
-});
-
-const start = async (videos: Record<string, TResolved | Error>, settings: Partial<TSettings> = {}) => {
-  const t = setup(videos, settings);
-  cleanup.push(t.cacheDir);
-  return t;
-};
-
 describe("ChannelPlayer", () => {
-  it("looks a video up, downloads it, plays it, and goes on air once ffmpeg sends", async () => {
-    const t = await start({ a: vod("a") });
+  it("downloads video and audio side by side and starts once 20 seconds are in", async () => {
+    const t = setup({ a: vod("a") });
     t.player.add("a", 1);
     await flush();
-    expect(t.player.snapshot().now).toMatchObject({ title: "Video a", state: "loading", progress: 0.5, thumbnail: "/thumb/axxxxxxxxxx.jpg" });
-    await t.downloaded("a");
+    expect(t.of("a").map((d) => [d.part?.formatId, path.basename(d.file)])).toEqual([
+      ["v", "video.mp4"],
+      ["a", "audio.webm"],
+    ]);
+    expect(t.player.snapshot().now).toMatchObject({ title: "Video a", state: "loading", thumbnail: "/thumb/axxxxxxxxxx.jpg" });
+    await t.grow("a", 0.05);
+    expect(t.encoders).toHaveLength(0);
+    expect(t.player.snapshot().now?.progress).toBeCloseTo(0.05);
+    await t.grow("a", 0.11);
     expect(t.encoders).toHaveLength(1);
-    expect(t.encoders[0]!.options).toMatchObject({ input: path.join(t.cacheDir, "filea.mkv"), start: 0, live: false });
+    expect(t.encoders[0]!.options).toMatchObject({
+      input: { video: t.of("a")[0]!.file, audio: t.of("a")[1]!.file },
+      follow: true,
+      start: 0,
+      length: 201,
+      live: false,
+    });
     expect(t.published).toHaveLength(0);
     t.encoders[0]!.start();
     expect(t.published).toEqual([{ title: "Video a", bannerUrl: "/thumb/axxxxxxxxxx.jpg" }]);
     t.encoders[0]!.elapsed = 12.6;
     expect(t.player.snapshot().now).toMatchObject({ state: "playing", position: 12 });
-    expect(t.player.busy).toBe(true);
-  });
-
-  it("starts at the link's time", async () => {
-    const t = await start({ a: vod("a", 200, { start: 42 }) });
-    t.player.add("a", 1);
-    await flush();
     await t.downloaded("a");
-    expect(t.encoders[0]!.options.start).toBe(42);
+    expect(t.player.snapshot().now?.progress).toBeNull();
+    expect(t.encoders).toHaveLength(1);
   });
 
-  it("downloads the next video while one plays, then plays it, then takes the stream down", async () => {
-    const t = await start({ a: vod("a"), b: vod("b") });
+  it("plays a download that finished while it waited without following it", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
     t.player.add("a", 1);
-    await flush();
+    t.player.add("b", 1);
     await t.downloaded("a");
     t.encoders[0]!.start();
-    t.player.add("b", 2);
-    await flush();
-    expect(t.downloads.map((d) => d.video.title).sort()).toEqual(["Video a", "Video b"]);
-    expect(t.player.snapshot().queue).toMatchObject([{ title: "Video b", state: "ready", progress: 0.5, addedBy: 2 }]);
     await t.downloaded("b");
     t.encoders[0]!.exit(0);
     await flush();
+    expect(t.encoders[1]!.options).toMatchObject({ follow: false, length: 201 });
+  });
+
+  it("starts at the link's time once that much is in", async () => {
+    const t = setup({ a: vod("a", 200, { start: 42 }) });
+    t.player.add("a", 1);
+    await t.grow("a", 0.25);
+    expect(t.encoders).toHaveLength(0);
+    await t.grow("a", 0.32);
+    expect(t.encoders[0]!.options).toMatchObject({ start: 42, length: 159 });
+  });
+
+  it("waits for the whole file when YouTube has no separate formats", async () => {
+    const t = setup({ a: vod("a", 200, { parts: null }) });
+    t.player.add("a", 1);
+    await t.grow("a", 0.9);
+    expect(t.encoders).toHaveLength(0);
+    await t.downloaded("a");
+    const options = t.encoders[0]!.options;
+    expect(options.follow).toBe(false);
+    expect(path.relative(path.join(t.cacheDir, t.player.snapshot().now!.id), options.input as string)).toMatch(/^\d+\/merged\.mkv$/);
+  });
+
+  it("downloads the next video while one plays, then plays it, then takes the stream down", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
+    t.player.add("a", 1);
+    await t.downloaded("a");
+    t.encoders[0]!.start();
+    t.player.add("b", 2);
+    await t.grow("b", 0.5);
+    expect(t.player.snapshot().queue).toMatchObject([{ title: "Video b", state: "ready", progress: 0.5, addedBy: 2 }]);
+    t.encoders[0]!.exit(0);
+    await flush();
     expect(t.encoders).toHaveLength(2);
-    expect(t.encoders[1]!.options.input).toBe(path.join(t.cacheDir, "fileb.mkv"));
+    expect(t.encoders[1]!.options.input).toEqual({ video: t.of("b")[0]!.file, audio: t.of("b")[1]!.file });
     t.encoders[1]!.start();
     expect(t.player.snapshot()).toMatchObject({ now: { title: "Video b" }, queue: [] });
     t.encoders[1]!.exit(0);
@@ -224,9 +285,8 @@ describe("ChannelPlayer", () => {
   });
 
   it("pauses where it is and resumes from there with a new ffmpeg", async () => {
-    const t = await start({ a: vod("a") });
+    const t = setup({ a: vod("a") });
     t.player.add("a", 1);
-    await flush();
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.encoders[0]!.elapsed = 30.4;
@@ -234,7 +294,6 @@ describe("ChannelPlayer", () => {
     expect(t.encoders[0]!.stopped).toBe(true);
     expect(t.player.snapshot().now).toMatchObject({ state: "paused", position: 30 });
     await flush();
-    expect(t.player.snapshot().now?.state).toBe("paused");
     t.player.resume();
     await flush();
     expect(t.encoders[1]!.options.start).toBeCloseTo(30.4);
@@ -245,10 +304,9 @@ describe("ChannelPlayer", () => {
     expect(t.published).toHaveLength(2);
   });
 
-  it("seeks by restarting at the new place, within the video", async () => {
-    const t = await start({ a: vod("a", 100) });
+  it("seeks by restarting at the new place, and only the last of quick seeks plays", async () => {
+    const t = setup({ a: vod("a", 100) });
     t.player.add("a", 1);
-    await flush();
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.player.seek(500);
@@ -258,26 +316,28 @@ describe("ChannelPlayer", () => {
     t.player.seek(-3);
     t.player.seek(20);
     await flush();
-    // only the last of several quick seeks plays
     expect(t.encoders).toHaveLength(3);
     expect(t.encoders[2]!.options.start).toBe(20);
     expect(t.connections.filter((c) => c.closed)).toHaveLength(2);
   });
 
-  it("remembers a seek made while downloading", async () => {
-    const t = await start({ a: vod("a", 100) });
+  it("waits with a seek past the download until that part is in", async () => {
+    const t = setup({ a: vod("a", 200) });
     t.player.add("a", 1);
+    await t.grow("a", 0.2);
+    t.encoders[0]!.start();
+    t.player.seek(150);
     await flush();
-    t.player.seek(50);
-    await t.downloaded("a");
-    expect(t.encoders[0]!.options.start).toBe(50);
+    expect(t.encoders).toHaveLength(1);
+    expect(t.player.snapshot().now).toMatchObject({ state: "loading", position: 150 });
+    await t.grow("a", 0.9);
+    expect(t.encoders[1]!.options).toMatchObject({ start: 150, follow: true });
   });
 
   it("retries a crashed video once from where it was", async () => {
-    const t = await start({ a: vod("a", 200), b: vod("b") });
+    const t = setup({ a: vod("a", 200), b: vod("b") });
     t.player.add("a", 1);
     t.player.add("b", 1);
-    await flush();
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.encoders[0]!.elapsed = 50;
@@ -286,16 +346,53 @@ describe("ChannelPlayer", () => {
     expect(t.encoders[1]!.options.start).toBe(50);
     t.encoders[1]!.start();
     t.encoders[1]!.exit(1);
+    await t.downloaded("b");
+    expect(t.player.snapshot()).toMatchObject({ now: { title: "Video b" }, error: { key: "error.playback" } });
+  });
+
+  it("retries again after playing a while since the last retry", async () => {
+    const t = setup({ a: vod("a", 600) });
+    t.player.add("a", 1);
+    await t.downloaded("a");
+    for (const [index, start] of [[0, 0], [1, 100], [2, 200]] as const) {
+      expect(t.encoders[index]!.options.start).toBe(start);
+      t.encoders[index]!.start();
+      t.encoders[index]!.elapsed = 100;
+      t.encoders[index]!.exit(1);
+      await flush();
+    }
+    expect(t.encoders).toHaveLength(4);
+    expect(t.player.snapshot().error).toBeNull();
+  });
+
+  it("tells ffmpeg whether the files it follows are still growing", async () => {
+    const t = setup({ a: vod("a") });
+    t.player.add("a", 1);
+    await t.grow("a", 0.5);
+    expect(t.encoders[0]!.options.follow).toBe(true);
+    expect(t.encoders[0]!.events.growing?.()).toBe(true);
+    await t.downloaded("a");
+    expect(t.encoders[0]!.events.growing?.()).toBe(false);
+  });
+
+  it("ends the video when its download fails", async () => {
+    const t = setup({ a: vod("a") });
+    t.player.add("a", 1);
+    await t.grow("a", 0.5);
+    t.encoders[0]!.start();
+    t.of("a")[0]!.done.reject(new UserError("yt.unavailable"));
     await flush();
-    expect(t.player.snapshot()).toMatchObject({ now: { title: "Video b" }, error: "Playback failed" });
+    expect(t.encoders[0]!.stopped).toBe(true);
+    expect(t.player.snapshot()).toMatchObject({ now: null, error: { key: "yt.unavailable" } });
+    expect(t.of("a")[1]!.signal.aborted).toBe(true);
   });
 
   it("restarts a dropped livestream with a fresh playlist, but not forever", async () => {
-    const t = await start({ l: live("l") });
+    const t = setup({ l: live("l") });
     t.player.add("l", 1);
     await flush();
     expect(t.downloads).toHaveLength(0);
-    expect(t.encoders[0]!.options).toMatchObject({ input: "https://m/l.m3u8", live: true });
+    expect(t.encoders[0]!.options).toMatchObject({ input: "https://m/l.m3u8", live: true, follow: false, length: undefined });
     for (let i = 1; i <= 3; i++) {
       t.encoders[i - 1]!.start();
       t.encoders[i - 1]!.exit(1);
@@ -306,12 +403,12 @@ describe("ChannelPlayer", () => {
     expect(t.resolves).toEqual(["l", "l", "l", "l"]);
     t.encoders[3]!.exit(1);
     await flush();
-    expect(t.player.snapshot()).toMatchObject({ now: null, error: "The livestream keeps dropping out" });
+    expect(t.player.snapshot()).toMatchObject({ now: null, error: { key: "error.liveDropping" } });
   });
 
   it("ends a livestream that is over without an error", async () => {
     const videos: Record<string, TResolved> = { l: live("l") };
-    const t = await start(videos);
+    const t = setup(videos);
     t.player.add("l", 1);
     await flush();
     t.encoders[0]!.start();
@@ -322,148 +419,214 @@ describe("ChannelPlayer", () => {
   });
 
   it("refuses to pause or seek a livestream", async () => {
-    const t = await start({ l: live("l") });
+    const t = setup({ l: live("l") });
     t.player.add("l", 1);
     await flush();
     expect(() => t.player.pause()).toThrow("can't be paused");
     expect(() => t.player.seek(10)).toThrow("can't be seeked");
   });
 
+  it("says when it is too early to pause or seek", async () => {
+    const t = setup({ a: vod("a") });
+    t.player.add("a", 1);
+    expect(() => t.player.seek(10)).toThrow("Still loading");
+    await flush();
+    expect(() => t.player.pause()).toThrow("Still loading");
+  });
+
   it("drops what cannot be found or is too long, and says why", async () => {
-    const t = await start({ long: vod("long", 7200), ok: vod("ok") }, { maxSeconds: 3600 });
+    const t = setup({ long: vod("long", 7200), ok: vod("ok") }, { settings: { maxSeconds: 3600 } });
     t.player.add("missing", 1);
     await flush();
-    expect(t.player.snapshot()).toMatchObject({ now: null, queue: [], error: "Nothing found" });
+    expect(t.player.snapshot()).toMatchObject({ now: null, queue: [], error: { key: "yt.nothingFound" } });
     t.player.add("long", 1);
     await flush();
-    expect(t.player.snapshot().error).toBe("Videos can be up to 60 minutes long");
+    expect(t.player.snapshot().error).toEqual({ key: "error.tooLong", params: { minutes: 60 } });
     t.player.add("ok", 1);
     await flush();
     expect(t.player.snapshot()).toMatchObject({ now: { title: "Video ok" }, error: null });
   });
 
   it("logs unexpected failures and shows a plain message", async () => {
-    const t = await start({ boom: new Error("spawn ENOENT /secret/path") });
+    const t = setup({ boom: new Error("spawn ENOENT /secret/path") });
     t.player.add("boom", 1);
     await flush();
-    expect(t.player.snapshot().error).toBe("Something went wrong");
+    expect(t.player.snapshot().error).toEqual({ key: "error.generic" });
     expect(JSON.stringify(t.errors)).toContain("ENOENT");
   });
 
+  it("refuses a download the disk has no room for", async () => {
+    const t = setup({ a: vod("a") });
+    t.setFree(300 * 1024 * 1024);
+    t.player.add("a", 1);
+    await flush();
+    expect(t.downloads).toHaveLength(0);
+    expect(t.player.snapshot()).toMatchObject({ now: null, error: { key: "error.disk" } });
+    t.setFree(10 * 1024 ** 3);
+    t.player.add("a", 1);
+    await flush();
+    expect(t.downloads).toHaveLength(2);
+  });
+
   it("leaves livestreams out of the length limit", async () => {
-    const t = await start({ l: live("l") }, { maxSeconds: 60 });
+    const t = setup({ l: live("l") }, { settings: { maxSeconds: 60 } });
     t.player.add("l", 1);
     await flush();
     expect(t.encoders).toHaveLength(1);
   });
 
-  it("refuses a new video when the server is at its limit", async () => {
-    const t = await start({ a: vod("a") });
+  it("refuses a new video when the server is at its limit", () => {
+    const t = setup({ a: vod("a") });
     t.setSlots(false);
     expect(() => t.player.add("a", 1)).toThrow("Too many videos");
   });
 
   it("removes a queued video and stops its download", async () => {
-    const t = await start({ a: vod("a"), b: vod("b"), c: vod("c") });
+    const t = setup({ a: vod("a"), b: vod("b"), c: vod("c") });
     t.player.add("a", 1);
     t.player.add("b", 1);
     t.player.add("c", 1);
+    await t.grow("b", 0.1);
+    expect(t.of("c")).toHaveLength(0);
+    t.player.remove(t.player.snapshot().queue[0]!.id);
     await flush();
-    const b = t.player.snapshot().queue[0]!;
-    expect(b.title).toBe("Video b");
-    expect(t.download("b")).toBeDefined();
-    expect(t.download("c")).toBeUndefined();
-    t.player.remove(b.id);
-    await flush();
-    expect(t.download("b")!.signal.aborted).toBe(true);
+    expect(t.of("b").every((d) => d.signal.aborted)).toBe(true);
     // the next one in line downloads instead
-    expect(t.download("c")).toBeDefined();
+    expect(t.of("c")).toHaveLength(2);
     expect(t.player.snapshot().queue.map((entry) => entry.title)).toEqual(["Video c"]);
   });
 
-  it("stops everything at once", async () => {
-    const t = await start({ a: vod("a"), b: vod("b") });
+  it("moves queued videos, and downloads whichever is next", async () => {
+    const t = setup({ a: vod("a"), b: vod("b"), c: vod("c"), d: vod("d") });
+    for (const id of ["a", "b", "c", "d"]) t.player.add(id, 1);
+    await flush();
+    const ids = () => t.player.snapshot().queue.map((entry) => entry.title.at(-1));
+    const id = (title: string) => t.player.snapshot().queue.find((entry) => entry.title === `Video ${title}`)!.id;
+    t.player.move(id("d"), 0);
+    expect(ids()).toEqual(["d", "b", "c"]);
+    await flush();
+    expect(t.of("d")).toHaveLength(2);
+    t.player.move(id("d"), 99);
+    expect(ids()).toEqual(["b", "c", "d"]);
+    t.player.move(id("c"), -5);
+    expect(ids()).toEqual(["c", "b", "d"]);
+    t.player.move("nope", 0);
+    expect(ids()).toEqual(["c", "b", "d"]);
+  });
+
+  it("downloads only the next video: one moved away from next stops quietly", async () => {
+    const t = setup({ a: vod("a"), b: vod("b"), c: vod("c"), d: vod("d") });
+    for (const id of ["a", "b", "c", "d"]) t.player.add(id, 1);
+    await t.grow("b", 0.1);
+    const id = (title: string) => t.player.snapshot().queue.find((entry) => entry.title === `Video ${title}`)!.id;
+    for (const title of ["c", "d", "c", "b"]) {
+      t.player.move(id(title), 0);
+      await flush();
+    }
+    const running = t.downloads.filter((d) => !d.signal.aborted).map((d) => d.video.title.at(-1));
+    expect(running.sort()).toEqual(["a", "a", "b", "b"]);
+    expect(t.player.snapshot()).toMatchObject({ error: null, queue: [{ title: "Video b", progress: 0 }, { title: "Video c" }, { title: "Video d" }] });
+  });
+
+  it("keeps room on the disk for downloads still running", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
+    // room for one 110 byte video next to the reserve, not two
+    t.setFree(512 * 1024 * 1024 + 150);
     t.player.add("a", 1);
     t.player.add("b", 1);
     await flush();
+    expect(t.of("a")).toHaveLength(2);
+    expect(t.of("b")).toHaveLength(0);
+    expect(t.player.snapshot()).toMatchObject({ now: { title: "Video a" }, queue: [], error: { key: "error.disk" } });
+  });
+
+  it("queues a playlist's videos once it is looked up, leaving out the too long ones", async () => {
+    const t = setup({ aaaaaaaaaaa: vod("aaaaaaaaaaa", 100, { title: "First" }), ccccccccccc: vod("ccccccccccc", 100, { title: "Third" }) }, { settings: { maxSeconds: 600 } });
+    t.player.add("https://www.youtube.com/playlist?list=PL0123456789", 3);
+    expect(t.player.snapshot().queue).toMatchObject([{ playlist: true, state: "resolving", addedBy: 3 }]);
+    await waitFor(() => t.playlistLookups.length === 1);
+    t.playlistLookups[0]!.done.resolve([
+      { videoId: "aaaaaaaaaaa", title: "First", duration: 100 },
+      { videoId: "bbbbbbbbbbb", title: "Long", duration: 9000 },
+      { videoId: "ccccccccccc", title: "Third", duration: 0 },
+    ]);
+    await flush();
+    const snapshot = t.player.snapshot();
+    // the first one is up, and the next one downloads; neither was looked up before its turn
+    expect(snapshot.now?.title).toBe("First");
+    expect(snapshot.queue).toMatchObject([{ title: "Third", state: "ready" }]);
+    expect(snapshot.queue[0]!.playlist).toBeUndefined();
+    expect(snapshot.error).toEqual({ key: "error.someTooLong", params: { minutes: 10 } });
+    expect(t.resolves).toEqual(["aaaaaaaaaaa", "ccccccccccc"]);
+  });
+
+  it("says when a playlist did not fit into the queue", async () => {
+    const t = setup({ a: vod("a") });
+    // one playing, 47 waiting
+    for (let i = 0; i < 48; i++) t.player.add("a", 1);
+    t.player.add("https://www.youtube.com/playlist?list=PL0123456789", 1);
+    await waitFor(() => t.playlistLookups.length === 1);
+    t.playlistLookups[0]!.done.resolve(["bbbbbbbbbbb", "ccccccccccc", "ddddddddddd", "eeeeeeeeeee", "fffffffffff"].map((videoId) => ({ videoId, title: videoId, duration: 60 })));
+    await flush();
+    expect(t.player.snapshot().queue).toHaveLength(50);
+    expect(t.player.snapshot().error).toEqual({ key: "error.queueFullSome", params: { count: 3, total: 5 } });
+  });
+
+  it("forgets a playlist removed while it is looked up", async () => {
+    const t = setup({});
+    t.player.add("https://www.youtube.com/playlist?list=PL0123456789", 1);
+    await waitFor(() => t.playlistLookups.length === 1);
+    t.player.remove(t.player.snapshot().queue[0]!.id);
+    expect(t.playlistLookups[0]!.signal.aborted).toBe(true);
+    expect(t.player.snapshot().queue).toEqual([]);
+  });
+
+  it("stops everything at once", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
+    t.player.add("a", 1);
+    t.player.add("b", 1);
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.player.stop();
     await flush();
     expect(t.encoders[0]!.stopped).toBe(true);
-    expect(t.download("b")!.signal.aborted).toBe(true);
+    expect(t.of("b").every((d) => d.signal.aborted)).toBe(true);
     expect(t.player.snapshot()).toMatchObject({ now: null, queue: [] });
     expect(t.removed()).toBe(1);
     expect(t.encoders).toHaveLength(1);
   });
 
   it("skips to the next video", async () => {
-    const t = await start({ a: vod("a"), b: vod("b") });
+    const t = setup({ a: vod("a"), b: vod("b") });
     t.player.add("a", 1);
     t.player.add("b", 1);
-    await flush();
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.player.skip();
     await t.downloaded("b");
-    expect(t.encoders[1]!.options.input).toBe(path.join(t.cacheDir, "fileb.mkv"));
-  });
-
-  it("keeps the lock until it is lifted", async () => {
-    const t = await start({});
-    t.player.setLocked(true);
-    expect(t.player.snapshot().locked).toBe(true);
-    expect(t.player.isLocked).toBe(true);
-    t.player.setLocked(false);
-    expect(t.player.isLocked).toBe(false);
-  });
-
-  it("is done after destroy", async () => {
-    const t = await start({ a: vod("a") });
-    t.player.add("a", 1);
-    await flush();
-    await t.downloaded("a");
-    t.encoders[0]!.start();
-    t.player.destroy();
-    await flush();
-    expect(t.encoders[0]!.stopped).toBe(true);
-    expect(t.removed()).toBe(1);
-    expect(() => t.player.add("a", 1)).toThrow(UserError);
-  });
-
-  it("says when it is too early to pause or seek", async () => {
-    const t = await start({ a: vod("a") });
-    t.player.add("a", 1);
-    // not looked up yet
-    expect(() => t.player.seek(10)).toThrow("Still loading");
-    await flush();
-    // looked up, still downloading
-    expect(() => t.player.pause()).toThrow("Still loading");
-    expect(t.player.snapshot().now?.state).toBe("loading");
+    expect(t.encoders[1]!.options.input).toEqual({ video: t.of("b")[0]!.file, audio: t.of("b")[1]!.file });
   });
 
   it("closes the transports when ffmpeg cannot even start", async () => {
-    const t = await start({ a: vod("a") });
+    const t = setup({ a: vod("a") });
     t.failEncode(new Error("spawn ENOENT"));
     t.player.add("a", 1);
-    await flush();
     await t.downloaded("a");
     expect(t.connections).toHaveLength(1);
     expect(t.connections[0]!.closed).toBe(true);
-    expect(t.player.snapshot()).toMatchObject({ now: null, error: "Something went wrong" });
+    expect(t.player.snapshot()).toMatchObject({ now: null, error: { key: "error.generic" } });
   });
 
   it("waits for a free slot, and starts when it gets one", async () => {
-    const t = await start({ a: vod("a"), b: vod("b") });
+    const t = setup({ a: vod("a"), b: vod("b") });
     t.player.add("a", 1);
     t.player.add("b", 1);
-    await flush();
     await t.downloaded("a");
     t.encoders[0]!.start();
     t.setSlots(false);
     t.encoders[0]!.exit(0);
     await flush();
-    expect(t.player.snapshot()).toMatchObject({ now: null, queue: [{ title: "Video b" }], error: "Too many videos are playing on this server" });
+    expect(t.player.snapshot()).toMatchObject({ now: null, queue: [{ title: "Video b" }], error: { key: "error.slots" } });
     expect(t.player.busy).toBe(false);
     t.setSlots(true);
     t.player.retry();
@@ -474,15 +637,29 @@ describe("ChannelPlayer", () => {
     expect(t.freed()).toBe(1);
   });
 
-  it("counts its revision up with every change", async () => {
-    const t = await start({ a: vod("a") });
+  it("keeps the lock until it is lifted, and counts its revision up", () => {
+    const t = setup({});
     const before = t.player.snapshot().rev;
     t.player.setLocked(true);
+    expect(t.player.snapshot()).toMatchObject({ locked: true });
     expect(t.player.snapshot().rev).toBeGreaterThan(before);
+    t.player.setLocked(false);
+    expect(t.player.isLocked).toBe(false);
   });
 
-  it("refuses more than a full queue", async () => {
-    const t = await start({ a: vod("a") });
+  it("is done after destroy", async () => {
+    const t = setup({ a: vod("a") });
+    t.player.add("a", 1);
+    await t.downloaded("a");
+    t.encoders[0]!.start();
+    await t.player.destroy();
+    expect(t.encoders[0]!.stopped).toBe(true);
+    expect(t.removed()).toBe(1);
+    expect(() => t.player.add("a", 1)).toThrow(UserError);
+  });
+
+  it("refuses more than a full queue", () => {
+    const t = setup({ a: vod("a") });
     for (let i = 0; i < 51; i++) t.player.add("a", 1);
     expect(() => t.player.add("a", 1)).toThrow("queue is full");
   });

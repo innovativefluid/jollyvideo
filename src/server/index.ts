@@ -1,13 +1,13 @@
 /** Jollyvideo's server half: actions for the panel, a few chat commands, the players. */
 import type { PluginContext, TInvokerContext } from "@sharkord/plugin-sdk";
 import type { Permission } from "@sharkord/shared";
-import { mkdir, rm } from "fs/promises";
+import { mkdir, rm, statfs } from "fs/promises";
 import path from "path";
 import { MAX_QUERY_LENGTH, type TControl, type TJollyvideo, type TPlayer, type TViewer } from "../contract";
 import { startEncoder } from "./encoder";
-import { errorText, UserError } from "./errors";
+import { encodeForPanel, errorText, UserError, userMessage } from "./errors";
 import { createOutput } from "./output";
-import { ChannelPlayer, currentRevision } from "./player";
+import { ChannelPlayer, currentRevision, type TDisk } from "./player";
 import { closeWhenEmpty, Players } from "./players";
 import { readSettings, SETTINGS } from "./settings";
 import { Thumbnails } from "./thumbnails";
@@ -40,11 +40,14 @@ export const parseControl = (payload: unknown): TControl => {
     case "remove":
       if (typeof p.id === "string" && p.id.length <= 64) return { op: "remove", id: p.id };
       break;
+    case "move":
+      if (typeof p.id === "string" && p.id.length <= 64 && typeof p.to === "number" && Number.isInteger(p.to)) return { op: "move", id: p.id, to: p.to };
+      break;
     case "lock":
       if (typeof p.locked === "boolean") return { op: "lock", locked: p.locked };
       break;
   }
-  throw new UserError("Unknown control");
+  throw new UserError("error.unknownControl");
 };
 
 const idle = (channelId: number): TPlayer => ({ channelId, rev: currentRevision(), now: null, queue: [], locked: false, error: null });
@@ -87,7 +90,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     try {
       await toolbox.ensure();
     } catch {
-      throw new UserError("yt-dlp or ffmpeg couldn't be installed, see the plugin log");
+      throw new UserError("error.tools");
     }
   };
 
@@ -98,6 +101,18 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
   const thumbnails = new Thumbnails(`/plugins/${ctx.pluginId}`, log);
   ctx.http.get("/thumb/*", thumbnails.handle);
 
+  // one disk for every channel's downloads
+  const disk: TDisk = {
+    free: async (dir) => {
+      try {
+        const stats = await statfs(dir);
+        return stats.bavail * stats.bsize;
+      } catch {
+        return null;
+      }
+    },
+    reserved: 0,
+  };
   const players: Players = new Players(
     (channelId) =>
       new ChannelPlayer(channelId, {
@@ -106,6 +121,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
         ready,
         ffmpeg: toolbox.ffmpeg,
         cacheDir,
+        disk,
         createOutput: (id) => createOutput(ctx.voice, id, `${ctx.pluginId}:${id}`),
         encode: startEncoder,
         thumbnail: (videoId) => thumbnails.url(videoId),
@@ -123,6 +139,9 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
       }
     },
   );
+  const closePlayer = (channelId: number) => {
+    players.close(channelId).catch((error) => log.error("[players]", errorText(error)));
+  };
 
   const empty = closeWhenEmpty({
     isEmpty: (channelId) => {
@@ -133,24 +152,24 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
       }
     },
     hasPlayer: (channelId) => !!players.get(channelId),
-    close: (channelId) => void players.close(channelId),
+    close: (channelId) => closePlayer(channelId),
     delayMs: EMPTY_CHANNEL_MS,
   });
   ctx.events.on("user:left_voice", ({ channelId }) => empty.left(channelId));
   ctx.events.on("user:joined_voice", ({ channelId }) => empty.joined(channelId));
-  ctx.events.on("voice:runtime_closed", ({ channelId }) => void players.close(channelId));
+  ctx.events.on("voice:runtime_closed", ({ channelId }) => closePlayer(channelId));
 
   const canModerate = (userId: number) => ctx.permissions.userCan(userId, MODERATOR);
 
   const voiceChannel = (invoker: TInvokerContext): number => {
-    if (!invoker.currentVoiceChannelId) throw new UserError("Join a voice channel first");
+    if (!invoker.currentVoiceChannelId) throw new UserError("error.joinVoice");
     return invoker.currentVoiceChannelId;
   };
 
   /** the player of the caller's voice channel, if the lock lets them control it */
   const controllable = async (invoker: TInvokerContext): Promise<ChannelPlayer> => {
     const player = players.open(voiceChannel(invoker));
-    if (player.isLocked && !(await canModerate(invoker.userId))) throw new UserError("Only moderators can control this right now");
+    if (player.isLocked && !(await canModerate(invoker.userId))) throw new UserError("error.locked");
     return player;
   };
 
@@ -159,22 +178,25 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     canModerate: await canModerate(invoker.userId),
   });
 
-  /** what users read is ours; anything unexpected is logged and stays vague */
+  /**
+   * What users read is ours; anything unexpected is logged and stays vague.
+   * The panel gets keys to translate, chat commands get English.
+   */
   const guarded =
-    <A extends unknown[], R>(name: string, run: (...args: A) => Promise<R>) =>
+    <A extends unknown[], R>(name: string, run: (...args: A) => Promise<R>, kind: "action" | "command" = "action") =>
     async (...args: A): Promise<R> => {
       try {
         return await run(...args);
       } catch (error) {
-        if (error instanceof UserError) throw error;
-        log.error(`[${name}]`, errorText(error));
-        throw new Error("Something went wrong");
+        if (!(error instanceof UserError)) log.error(`[${name}]`, errorText(error));
+        const message = userMessage(error);
+        throw new Error(kind === "action" ? encodeForPanel(message) : error instanceof UserError ? error.message : "Something went wrong");
       }
     };
 
   const control = async (invoker: TInvokerContext, op: TControl): Promise<ChannelPlayer> => {
     if (op.op === "lock") {
-      if (!(await canModerate(invoker.userId))) throw new UserError("Only moderators can lock the player");
+      if (!(await canModerate(invoker.userId))) throw new UserError("error.lockModerators");
       const player = players.open(voiceChannel(invoker));
       player.setLocked(op.locked);
       return player;
@@ -202,12 +224,15 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
       case "remove":
         player.remove(op.id);
         break;
+      case "move":
+        player.move(op.id, op.to);
+        break;
     }
     return player;
   };
 
   const add = async (invoker: TInvokerContext, query: unknown): Promise<ChannelPlayer> => {
-    if (typeof query !== "string" || query.length > MAX_QUERY_LENGTH * 2) throw new UserError("Paste a YouTube link or type a search");
+    if (typeof query !== "string" || query.length > MAX_QUERY_LENGTH * 2) throw new UserError("query.empty");
     const player = await controllable(invoker);
     player.add(query, invoker.userId);
     return player;
@@ -237,13 +262,13 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
 
   ctx.commands.register({
     name: "watch",
-    description: "Play a YouTube video or livestream in your voice channel",
+    description: "Play a YouTube video, playlist or livestream in your voice channel",
     args: [{ name: "query", description: "YouTube link or search", type: "string", required: true }],
     requires: IN_VOICE,
     executes: guarded("watch", async (invoker, args) => {
       await add(invoker, args?.query);
       return "Added";
-    }),
+    }, "command"),
   });
 
   ctx.commands.register({
@@ -253,7 +278,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     executes: guarded("watch-skip", async (invoker) => {
       await control(invoker, { op: "skip" });
       return "Skipped";
-    }),
+    }, "command"),
   });
 
   ctx.commands.register({
@@ -263,7 +288,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     executes: guarded("watch-stop", async (invoker) => {
       await control(invoker, { op: "stop" });
       return "Stopped";
-    }),
+    }, "command"),
   });
 
   ctx.commands.register({
@@ -274,7 +299,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
       const locked = !players.open(voiceChannel(invoker)).isLocked;
       await control(invoker, { op: "lock", locked });
       return locked ? "Locked" : "Unlocked";
-    }),
+    }, "command"),
   });
 
   ctx.commands.register({
@@ -289,7 +314,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
         () => "The update failed, see the plugin log",
       );
       return Promise.race([update, Bun.sleep(25_000).then(() => "Updating yt-dlp, this takes a moment")]);
-    }),
+    }, "command"),
   });
 
   ctx.ui.enable({ voice_controls: IN_VOICE });

@@ -2,17 +2,20 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { cls } from "./classes";
 import { formatTime } from "./format";
+import { t } from "./text";
 
 type TSeekBarProps = {
   position: number;
   duration: number;
+  /** how much is downloaded, 0..1, while it downloads */
+  buffered: number | null;
   disabled: boolean;
   onSeek(position: number): void;
 };
 
 const THUMB_PX = 16;
 
-export const SeekBar = ({ position, duration, disabled, onSeek }: TSeekBarProps) => {
+export const SeekBar = ({ position, duration, buffered, disabled, onSeek }: TSeekBarProps) => {
   const track = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<number | null>(null);
   const value = dragging ?? position;
@@ -58,12 +61,13 @@ export const SeekBar = ({ position, duration, disabled, onSeek }: TSeekBarProps)
       onPointerCancel={() => setDragging(null)}
     >
       <div ref={track} className={cls.sliderTrack} data-orientation="horizontal">
+        {buffered !== null && <div className={cls.sliderBuffered} style={{ left: 0, width: `${Math.min(100, buffered * 100)}%` }} />}
         <div className={cls.sliderRange} data-orientation="horizontal" style={{ left: 0, width: `${percent}%` }} />
       </div>
       <div
         role="slider"
         tabIndex={disabled ? -1 : 0}
-        aria-label="Position"
+        aria-label={t("ui.position")}
         aria-valuemin={0}
         aria-valuemax={Math.floor(duration)}
         aria-valuenow={Math.floor(value)}

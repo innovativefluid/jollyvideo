@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { UserError } from "../../src/server/errors";
 import { QUALITIES } from "../../src/server/settings";
-import { commonArgs, describeFailure, parseInfo, parseQuery, parseStart, pickFormat, pickLive, sourceArg } from "../../src/server/youtube";
+import { commonArgs, describeFailure, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg } from "../../src/server/youtube";
 
 const q720p60 = QUALITIES["720p60"]!;
 const q720p30 = QUALITIES["720p30"]!;
@@ -41,6 +41,13 @@ describe("parseQuery", () => {
     );
   });
 
+  it("queues a playlist page, but plays the video of a link that is in one", () => {
+    expect(parseQuery("https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")).toEqual({ kind: "playlist", listId: "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf" });
+    expect(parseQuery("https://youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf").kind).toBe("video");
+    expect(sourceArg({ kind: "playlist", listId: "PL123456789" })).toBe("https://www.youtube.com/playlist?list=PL123456789");
+    expect(() => parseQuery("https://www.youtube.com/playlist?list=../x")).toThrow(UserError);
+  });
+
   it("searches for anything that is not a link", () => {
     expect(parseQuery("lofi  hip hop\nradio")).toEqual({ kind: "search", text: "lofi hip hop radio" });
     expect(sourceArg(parseQuery("--exec rm"))).toBe("ytsearch1:--exec rm");
@@ -65,7 +72,7 @@ describe("parseQuery", () => {
 
   it("ignores config files and passes the JavaScript runtime", () => {
     const args = commonArgs({ path: "/y", cookies: "/c.txt", scratch: "/tmp", jsRuntime: { args: ["--js-runtimes", "bun:/bun"], env: {} } });
-    expect(args).toEqual(["--ignore-config", "--no-playlist", "--no-warnings", "--js-runtimes", "bun:/bun"]);
+    expect(args).toEqual(["--ignore-config", "--no-warnings", "--js-runtimes", "bun:/bun"]);
   });
 });
 
@@ -76,10 +83,12 @@ const video = (id: string, height: number, vcodec: string, fps = 30, extra: obje
   height,
   fps,
   tbr: height,
+  ext: "mp4",
   protocol: "https",
   ...extra,
 });
-const audio = (id: string, acodec: string, abr: number, extra: object = {}) => ({ format_id: id, vcodec: "none", acodec, abr, protocol: "https", ...extra });
+const audio = (id: string, acodec: string, abr: number, extra: object = {}) => ({ format_id: id, ext: "webm", vcodec: "none", acodec, abr, filesize: 1000, protocol: "https", ...extra });
+const ids = (picked: ReturnType<typeof pickFormat>) => `${picked.parts?.video.formatId}+${picked.parts?.audio.formatId}`;
 
 describe("pickFormat", () => {
   const formats = [
@@ -100,17 +109,22 @@ describe("pickFormat", () => {
   ];
 
   it("goes as tall as allowed at the allowed frame rate, preferring H.264, SDR and the original full-range Opus track", () => {
-    expect(pickFormat(formats, q720p60)).toEqual({ format: "298+251/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b", fps: 60 });
-    expect(pickFormat(formats, q720p30).format.split("/")[0]).toBe("136+251");
-    expect(pickFormat(formats, q480).format.split("/")[0]).toBe("135+251");
+    expect(pickFormat(formats, q720p60)).toEqual({
+      parts: { video: { formatId: "298", format: "298/bv[height<=720]", ext: "mp4", size: null }, audio: { formatId: "251", format: "251/ba", ext: "webm", size: 1000 } },
+      format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
+      fps: 60,
+    });
+    expect(ids(pickFormat(formats, q720p30))).toBe("136+251");
+    expect(ids(pickFormat(formats, q480))).toBe("135+251");
   });
 
   it("takes the shortest video when nothing is short enough", () => {
-    expect(pickFormat([video("137", 1080, "avc1"), video("136", 720, "vp9"), audio("251", "opus", 130)], q480).format.split("/")[0]).toBe("136+251");
+    expect(ids(pickFormat([video("137", 1080, "avc1"), video("136", 720, "vp9"), audio("251", "opus", 130)], q480))).toBe("136+251");
   });
 
   it("leaves the choice to yt-dlp without separate video and audio", () => {
     expect(pickFormat([{ format_id: "18", vcodec: "avc1", acodec: "mp4a", height: 360 }], q720p30)).toEqual({
+      parts: null,
       format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
       fps: null,
     });
@@ -118,7 +132,7 @@ describe("pickFormat", () => {
 
   it("skips DRM and HLS formats for downloads", () => {
     const picked = pickFormat([video("drm", 720, "avc1", 30, { has_drm: true }), video("hls", 720, "avc1", 30, { protocol: "m3u8_native" }), video("ok", 480, "vp9"), audio("251", "opus", 1)], q720p30);
-    expect(picked.format.split("/")[0]).toBe("ok+251");
+    expect(ids(picked)).toBe("ok+251");
   });
 });
 
@@ -168,11 +182,29 @@ describe("parseInfo", () => {
   });
 });
 
+describe("parsePlaylist", () => {
+  it("keeps the playable entries in order", () => {
+    const entries = [
+      { id: "aaaaaaaaaaa", title: "One", duration: 61.2 },
+      { id: "bbbbbbbbbbb", title: "[Private video]", duration: null },
+      { id: "ccccccccccc", title: "[Deleted video]" },
+      { id: "bad", title: "Bad id" },
+      { id: "ddddddddddd", title: " Two ", duration: null },
+    ];
+    expect(parsePlaylist(`${JSON.stringify({ _type: "playlist", entries })}\n`)).toEqual([
+      { videoId: "aaaaaaaaaaa", title: "One", duration: 61 },
+      { videoId: "ddddddddddd", title: "Two", duration: 0 },
+    ]);
+    expect(parsePlaylist("")).toEqual([]);
+  });
+});
+
 describe("describeFailure", () => {
   it("says what went wrong without yt-dlp's details", () => {
-    expect(describeFailure("WARNING: x\nERROR: [youtube] abc: Sign in to confirm you’re not a bot.")).toBe("YouTube wants the server to sign in");
-    expect(describeFailure("ERROR: [youtube] abc: Private video. Sign in if you've been granted access")).toBe("This video is private");
-    expect(describeFailure("ERROR: [youtube] abc: Video unavailable")).toBe("This video isn't available");
-    expect(describeFailure("ERROR: something new")).toBe("Couldn't load this video");
+    expect(describeFailure("WARNING: x\nERROR: [youtube] abc: Sign in to confirm you’re not a bot.")).toBe("yt.signIn");
+    expect(describeFailure("ERROR: [youtube] abc: Private video. Sign in if you've been granted access")).toBe("yt.private");
+    expect(describeFailure("ERROR: [youtube] abc: Video unavailable")).toBe("yt.unavailable");
+    expect(describeFailure("ERROR: unable to write data: [Errno 28] No space left on device")).toBe("error.disk");
+    expect(describeFailure("ERROR: something new")).toBe("yt.failed");
   });
 });

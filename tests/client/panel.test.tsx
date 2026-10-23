@@ -66,10 +66,10 @@ const installHost = () => {
   } as never;
 };
 
-const open = async () => {
+const open = async (name = "Watch together") => {
   render(<VoiceButton />);
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Watch together" }));
+    fireEvent.click(screen.getByRole("button", { name }));
   });
   return screen.getByRole("dialog");
 };
@@ -116,6 +116,14 @@ describe("the panel", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Skip" })));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop" })));
     expect(controls()).toEqual([{ op: "pause" }, { op: "skip" }, { op: "stop" }]);
+  });
+
+  it("shows an empty frame when the thumbnail does not load", async () => {
+    await open();
+    await show({ player: player({ now: now() }), canModerate: false });
+    const image = document.querySelector("[role=dialog] img")!;
+    await act(async () => fireEvent.error(image));
+    expect(document.querySelector("[role=dialog] img")).toBeNull();
   });
 
   it("seeks with the keyboard", async () => {
@@ -175,7 +183,7 @@ describe("the panel", () => {
 
   it("says why an action failed", async () => {
     await open();
-    failNext = "Only moderators can control this right now";
+    failNext = 'TRPCClientError: jv:{"key":"error.locked"}';
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "x" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Add" }));
@@ -185,7 +193,7 @@ describe("the panel", () => {
 
   it("shows the server's errors", async () => {
     await open();
-    await show({ player: player({ error: "This video is private" }), canModerate: false });
+    await show({ player: player({ error: { key: "yt.private" } }), canModerate: false });
     expect(screen.getByRole("alert").textContent).toBe("This video is private");
   });
 
@@ -234,6 +242,107 @@ describe("the panel", () => {
     expect(dialog.style.top).toBe("60px");
   });
 
+  const layOut = () =>
+    screen.getAllByRole("listitem").forEach((row, index) => {
+      row.getBoundingClientRect = () => ({ top: index * 30, height: 30, bottom: index * 30 + 30, left: 0, right: 300, width: 300, x: 0, y: index * 30, toJSON() {} }) as DOMRect;
+    });
+  const rowTexts = () => screen.getAllByRole("listitem").map((row) => row.textContent);
+
+  it("reorders the queue by dragging an entry by its handle", async () => {
+    await open();
+    await show({ player: player({ now: now(), queue: [entry("a"), entry("b"), entry("c")] }), canModerate: false });
+    layOut();
+    const grip = screen.getByRole("button", { name: "Move Next a" });
+    await act(async () => fireEvent.pointerDown(grip, { button: 0, pointerId: 1, clientY: 10 }));
+    await act(async () => fireEvent.pointerMove(grip, { pointerId: 1, clientY: 80 }));
+    // while dragging, rows only shift on screen
+    const rows = screen.getAllByRole("listitem");
+    expect(rowTexts()).toEqual(["1:15Next a", "1:15Next b", "1:15Next c"]);
+    expect(rows.map((row) => row.style.transform)).toEqual(["translateY(70px)", "translateY(-30px)", "translateY(-30px)"]);
+    await act(async () => fireEvent.pointerUp(grip, { pointerId: 1, clientY: 80 }));
+    expect(controls()).toEqual([{ op: "move", id: "a", to: 2 }]);
+    // shown at its new place until the server answers, also through other updates
+    expect(rowTexts()).toEqual(["1:15Next b", "1:15Next c", "1:15Next a"]);
+    await show({ player: player({ now: now({ position: 20 }), queue: [entry("a"), entry("b"), entry("c")] }), canModerate: false });
+    expect(rowTexts()).toEqual(["1:15Next b", "1:15Next c", "1:15Next a"]);
+    await show({ player: player({ now: now(), queue: [entry("b"), entry("c"), entry("a")] }), canModerate: false });
+    expect(rowTexts()).toEqual(["1:15Next b", "1:15Next c", "1:15Next a"]);
+    expect(screen.getAllByRole("listitem").every((row) => !row.style.transform)).toBe(true);
+  });
+
+  it("gives up a drag when the queue changes under it", async () => {
+    await open();
+    await show({ player: player({ now: now(), queue: [entry("a"), entry("b"), entry("c")] }), canModerate: false });
+    layOut();
+    const grip = screen.getByRole("button", { name: "Move Next c" });
+    await act(async () => fireEvent.pointerDown(grip, { button: 0, pointerId: 1, clientY: 70 }));
+    await act(async () => fireEvent.pointerMove(grip, { pointerId: 1, clientY: 5 }));
+    // the first video started playing
+    await show({ player: player({ now: now(), queue: [entry("b"), entry("c")] }), canModerate: false });
+    expect(screen.getAllByRole("listitem").every((row) => !row.style.transform)).toBe(true);
+    await act(async () => fireEvent.pointerUp(grip, { pointerId: 1, clientY: 5 }));
+    expect(controls()).toEqual([]);
+    expect(rowTexts()).toEqual(["1:15Next b", "1:15Next c"]);
+  });
+
+  it("moves an entry one step with the arrow keys, keeping the focus on it", async () => {
+    await open();
+    await show({ player: player({ now: now(), queue: [entry("a"), entry("b"), entry("c")] }), canModerate: false });
+    await act(async () => fireEvent.keyDown(screen.getByRole("button", { name: "Move Next a" }), { key: "ArrowUp" }));
+    expect(controls()).toEqual([]);
+    const grip = screen.getByRole("button", { name: "Move Next a" });
+    grip.focus();
+    await act(async () => fireEvent.keyDown(grip, { key: "ArrowDown" }));
+    await act(async () => fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" }));
+    expect(controls()).toEqual([
+      { op: "move", id: "a", to: 1 },
+      { op: "move", id: "a", to: 2 },
+    ]);
+    expect(rowTexts()).toEqual(["1:15Next b", "1:15Next c", "1:15Next a"]);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Move Next a" }));
+  });
+
+  it("clears the queue", async () => {
+    await open();
+    await show({ player: player({ now: now(), queue: [entry("a"), entry("b")] }), canModerate: false });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Clear the queue" })));
+    expect(controls()).toEqual([{ op: "clear" }]);
+  });
+
+  it("shows a playlist being looked up, and what is downloaded", async () => {
+    await open();
+    await show({ player: player({ now: now({ progress: 0.4 }), queue: [entry("p", { playlist: true, state: "resolving" })] }), canModerate: false });
+    expect(screen.getAllByRole("listitem")[0]!.textContent).toBe("Playlist");
+    expect(screen.queryByRole("button", { name: /^Move/ })).toBeNull();
+    const buffered = [...document.querySelectorAll<HTMLElement>("[role=dialog] div")].find((element) => element.className === cls.sliderBuffered);
+    expect(buffered?.style.width).toBe("40%");
+  });
+
+  it("speaks German or Polish when the browser does", async () => {
+    const languages = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(navigator), "languages");
+    Object.defineProperty(navigator, "languages", { value: ["de-AT", "en"], configurable: true });
+    try {
+      await open("Zusammen schauen");
+      expect(screen.getByRole("textbox", { name: "YouTube-Link oder Suche" })).toBeDefined();
+      await show({ player: player({ error: { key: "error.tooLong", params: { minutes: 90 } } }), canModerate: false });
+      expect(screen.getByRole("alert").textContent).toBe("Videos dürfen höchstens 90 Minuten lang sein");
+      Object.defineProperty(navigator, "languages", { value: ["pl"], configurable: true });
+      await show({ player: player({ error: { key: "yt.private" } }), canModerate: false });
+      expect(screen.getByRole("alert").textContent).toBe("Ten film jest prywatny");
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).languages;
+      if (languages && !("languages" in navigator)) Object.defineProperty(navigator, "languages", languages);
+    }
+  });
+
+  it("keeps an unexpected error vague", async () => {
+    await open();
+    failNext = "socket hang up";
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "x" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Add" })));
+    expect(screen.getByRole("alert").textContent).toBe("Something went wrong");
+  });
+
   it("ignores pushes for other channels", async () => {
     await open();
     await act(async () => push(player({ channelId: 99, now: now() })));
@@ -242,7 +351,7 @@ describe("the panel", () => {
 
   it("uses only Sharkord's classes", async () => {
     await open();
-    await show({ player: player({ now: now(), queue: [entry("a"), entry("b", { state: "resolving" })], locked: true, error: "x" }), canModerate: true });
+    await show({ player: player({ now: now({ progress: 0.5 }), queue: [entry("a"), entry("b", { state: "resolving" }), entry("p", { playlist: true, state: "resolving" })], locked: true, error: { key: "yt.private" } }), canModerate: true });
     const known = new Set(Object.values(cls).flatMap((value) => value.split(" ")));
     const used = new Set<string>();
     for (const element of [screen.getByRole("button", { name: "Watch together" }), ...document.querySelectorAll("[role=dialog] *, [role=dialog]")]) {

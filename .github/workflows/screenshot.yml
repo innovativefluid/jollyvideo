@@ -1,0 +1,30 @@
+name: Screenshot
+
+# Runs the end-to-end test and puts its screenshot on the `screenshots`
+# branch, for the README.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    uses: ./.github/workflows/e2e.yml
+
+  publish:
+    needs: e2e
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with: { name: e2e, path: e2e }
+      - env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          mkdir branch && cd branch
+          git init -q -b screenshots
+          cp ../e2e/dist/e2e/jollyvideo.png .
+          git add jollyvideo.png
+          git -c user.name=github-actions -c user.email=github-actions@github.com commit -qm "Screenshot from the end-to-end test"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}" screenshots

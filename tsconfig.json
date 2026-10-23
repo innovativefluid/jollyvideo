@@ -17,5 +17,5 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["src", "tests", "scripts", "build.ts"]
+  "include": ["src", "tests", "scripts", "e2e/setup.ts", "build.ts"]
 }

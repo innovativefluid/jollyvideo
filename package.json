@@ -1,6 +1,6 @@
 {
   "name": "jollyvideo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Watch YouTube videos and livestreams together in Sharkord voice channels",
   "private": true,
   "type": "module",
@@ -11,6 +11,7 @@
     "preview": "bun scripts/preview.ts",
     "sharkord": "git -c advice.detachedHead=false clone --quiet --depth 1 --branch v0.0.28 https://github.com/sharkord/sharkord.git .sharkord",
     "test": "bun test tests/unit tests/server && bun test --preload ./tests/helpers/dom.ts tests/client",
+    "test:e2e": "bash e2e/run.sh",
     "test:media": "bun test tests/media",
     "test:network": "bun test tests/network",
     "test:package": "bun test tests/package"

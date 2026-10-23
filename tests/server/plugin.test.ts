@@ -84,7 +84,7 @@ describe("the server half", () => {
       player: { channelId: CHANNEL, rev: expect.any(Number), now: null, queue: [], locked: false, error: null },
       canModerate: false,
     });
-    await expect(host.action("add", USER, undefined, { query: "x" })).rejects.toThrow("Join a voice channel first");
+    await expect(host.action("add", USER, undefined, { query: "x" })).rejects.toThrow("error.joinVoice");
   });
 
   it("plays what someone adds, as a stream in the channel", async () => {
@@ -105,11 +105,11 @@ describe("the server half", () => {
   });
 
   it("lets only moderators lock, and then only them control", async () => {
-    await expect(host.action("control", USER, CHANNEL, { op: "lock", locked: true })).rejects.toThrow("Only moderators can lock the player");
+    await expect(host.action("control", USER, CHANNEL, { op: "lock", locked: true })).rejects.toThrow("error.lockModerators");
     const locked = (await host.action("control", MODERATOR, CHANNEL, { op: "lock", locked: true })) as TViewer;
     expect(locked).toMatchObject({ player: { locked: true }, canModerate: true });
-    await expect(host.action("control", USER, CHANNEL, { op: "pause" })).rejects.toThrow("Only moderators can control this right now");
-    await expect(host.action("add", USER, CHANNEL, { query: "more" })).rejects.toThrow("Only moderators can control this right now");
+    await expect(host.action("control", USER, CHANNEL, { op: "pause" })).rejects.toThrow("error.locked");
+    await expect(host.action("add", USER, CHANNEL, { query: "more" })).rejects.toThrow("error.locked");
     await expect(host.command("watch-skip", USER, CHANNEL)).rejects.toThrow("Only moderators");
     const paused = (await host.action("control", MODERATOR, CHANNEL, { op: "pause" })) as TViewer;
     expect(paused.player.now?.state).toBe("paused");
@@ -128,9 +128,9 @@ describe("the server half", () => {
   });
 
   it("refuses unknown controls and keeps unexpected errors vague", async () => {
-    await expect(host.action("control", USER, CHANNEL, { op: "rm -rf" })).rejects.toThrow("Unknown control");
+    await expect(host.action("control", USER, CHANNEL, { op: "rm -rf" })).rejects.toThrow("error.unknownControl");
     host.failPermissions(new Error("database is down"));
-    await expect(host.action("state", USER, CHANNEL)).rejects.toThrow("Something went wrong");
+    await expect(host.action("state", USER, CHANNEL)).rejects.toThrow("error.generic");
     host.failPermissions(null);
     expect(host.logs.some((line) => line.includes("database is down"))).toBe(true);
   });

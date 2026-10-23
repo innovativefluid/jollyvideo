@@ -45,6 +45,19 @@ describe("encoder arguments", () => {
     expect(live.slice(0, live.indexOf("-i"))).toEqual(expect.arrayContaining(["-user_agent", "UA", "-re"]));
   });
 
+  it("reads separate video and audio files that are still growing, and stops at the video's end", () => {
+    const args = encoderArgs(options({ input: { video: "/c/video.mp4", audio: "/c/audio.webm" }, follow: true, start: 30, length: 171 }));
+    const inputs = args.slice(0, args.indexOf("-map"));
+    expect(inputs.join(" ")).toContain("-follow 1 -ss 30 -re -i /c/video.mp4 -follow 1 -ss 30 -re -i /c/audio.webm");
+    expect(args[args.indexOf("-map", args.indexOf("rtp://127.0.0.1:5000?pkt_size=1200")) + 1]).toBe("1:a:0");
+    expect(args.filter((arg) => arg === "-t")).toHaveLength(2);
+    expect(args[args.indexOf("-t") + 1]).toBe("171");
+    // a finished file needs neither
+    const done = encoderArgs(options({ input: { video: "/v", audio: "/a" } }));
+    expect(done).not.toContain("-follow");
+    expect(done).not.toContain("-t");
+  });
+
   it("signals a level each quality fits in", () => {
     expect(boxWidth(480)).toBe(854);
     expect(boxWidth(1080)).toBe(1920);
@@ -69,6 +82,8 @@ describe("parseControl", () => {
     expect(parseControl({ op: "pause", extra: 1 })).toEqual({ op: "pause" });
     expect(parseControl({ op: "seek", position: 12.5 })).toEqual({ op: "seek", position: 12.5 });
     expect(parseControl({ op: "lock", locked: true })).toEqual({ op: "lock", locked: true });
+    expect(parseControl({ op: "move", id: "x", to: 2 })).toEqual({ op: "move", id: "x", to: 2 });
+    expect(() => parseControl({ op: "move", id: "x", to: 1.5 })).toThrow("Unknown control");
     for (const bad of [null, "pause", { op: "seek", position: Infinity }, { op: "seek", position: "1" }, { op: "remove", id: "x".repeat(65) }, { op: "lock" }, { op: "eval" }]) {
       expect(() => parseControl(bad)).toThrow("Unknown control");
     }

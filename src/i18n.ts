@@ -1,0 +1,199 @@
+/**
+ * Every text a user reads, in English, German and Polish. The server sends
+ * keys; the panel picks the words.
+ */
+
+const en = {
+  // panel
+  "ui.watch": "Watch together",
+  "ui.placeholder": "YouTube link or search",
+  "ui.add": "Add",
+  "ui.lock": "Lock",
+  "ui.unlock": "Unlock",
+  "ui.locked": "Locked",
+  "ui.play": "Play",
+  "ui.pause": "Pause",
+  "ui.skip": "Skip",
+  "ui.stop": "Stop",
+  "ui.position": "Position",
+  "ui.loading": "Loading",
+  "ui.live": "LIVE",
+  "ui.playlist": "Playlist",
+  "ui.remove": "Remove {title}",
+  "ui.move": "Move {title}",
+  "ui.clear": "Clear the queue",
+  // errors
+  "error.generic": "Something went wrong",
+  "error.joinVoice": "Join a voice channel first",
+  "error.locked": "Only moderators can control this right now",
+  "error.lockModerators": "Only moderators can lock the player",
+  "error.unknownControl": "Unknown control",
+  "error.closed": "This voice channel has closed",
+  "error.nothingPlaying": "Nothing is playing",
+  "error.stillLoading": "Still loading",
+  "error.queueFull": "The queue is full",
+  "error.queueFullSome": "The queue is full: added {count} of {total} videos",
+  "error.slots": "Too many videos are playing on this server",
+  "error.tooLong": "Videos can be up to {minutes} minutes long",
+  "error.someTooLong": "Videos over {minutes} minutes were left out",
+  "error.livePause": "Livestreams can't be paused",
+  "error.liveSeek": "Livestreams can't be seeked",
+  "error.liveDropping": "The livestream keeps dropping out",
+  "error.playback": "Playback failed",
+  "error.tools": "yt-dlp or ffmpeg couldn't be installed, see the plugin log",
+  "error.ffmpeg": "ffmpeg isn't installed yet",
+  "error.disk": "The server is out of disk space",
+  "query.empty": "Paste a YouTube link or type a search",
+  "query.tooLong": "That's too long",
+  "query.badLink": "That link doesn't look right",
+  "query.notYouTube": "Only YouTube links work",
+  "query.notVideo": "That YouTube link isn't a video",
+  "yt.nothingFound": "Nothing found",
+  "yt.failed": "Couldn't load this video",
+  "yt.liveFailed": "Couldn't load this livestream",
+  "yt.playlistEmpty": "This playlist has no videos to play",
+  "yt.signIn": "YouTube wants the server to sign in",
+  "yt.private": "This video is private",
+  "yt.ageRestricted": "This video is age-restricted",
+  "yt.members": "This video is for channel members",
+  "yt.notStarted": "This hasn't started yet",
+  "yt.unavailable": "This video isn't available",
+  "yt.tooLarge": "This video is too large",
+};
+
+export type TMessageKey = keyof typeof en;
+export type TMessage = { key: TMessageKey; params?: Record<string, string | number> };
+
+const de: Record<TMessageKey, string> = {
+  "ui.watch": "Zusammen schauen",
+  "ui.placeholder": "YouTube-Link oder Suche",
+  "ui.add": "Hinzufügen",
+  "ui.lock": "Sperren",
+  "ui.unlock": "Entsperren",
+  "ui.locked": "Gesperrt",
+  "ui.play": "Abspielen",
+  "ui.pause": "Pause",
+  "ui.skip": "Überspringen",
+  "ui.stop": "Stopp",
+  "ui.position": "Position",
+  "ui.loading": "Lädt",
+  "ui.live": "LIVE",
+  "ui.playlist": "Playlist",
+  "ui.remove": "{title} entfernen",
+  "ui.move": "{title} verschieben",
+  "ui.clear": "Warteschlange leeren",
+  "error.generic": "Etwas ist schiefgelaufen",
+  "error.joinVoice": "Tritt zuerst einem Sprachkanal bei",
+  "error.locked": "Gerade können nur Moderatoren das steuern",
+  "error.lockModerators": "Nur Moderatoren können den Player sperren",
+  "error.unknownControl": "Unbekannte Steuerung",
+  "error.closed": "Dieser Sprachkanal wurde geschlossen",
+  "error.nothingPlaying": "Gerade läuft nichts",
+  "error.stillLoading": "Lädt noch",
+  "error.queueFull": "Die Warteschlange ist voll",
+  "error.queueFullSome": "Die Warteschlange ist voll: {count} von {total} Videos hinzugefügt",
+  "error.slots": "Auf diesem Server laufen zu viele Videos",
+  "error.tooLong": "Videos dürfen höchstens {minutes} Minuten lang sein",
+  "error.someTooLong": "Videos über {minutes} Minuten wurden ausgelassen",
+  "error.livePause": "Livestreams lassen sich nicht pausieren",
+  "error.liveSeek": "In Livestreams kann man nicht springen",
+  "error.liveDropping": "Der Livestream bricht immer wieder ab",
+  "error.playback": "Die Wiedergabe ist fehlgeschlagen",
+  "error.tools": "yt-dlp oder ffmpeg ließ sich nicht installieren, siehe Plugin-Log",
+  "error.ffmpeg": "ffmpeg ist noch nicht installiert",
+  "error.disk": "Auf dem Server ist kein Speicherplatz mehr frei",
+  "query.empty": "Füge einen YouTube-Link ein oder suche etwas",
+  "query.tooLong": "Das ist zu lang",
+  "query.badLink": "Dieser Link sieht nicht richtig aus",
+  "query.notYouTube": "Nur YouTube-Links funktionieren",
+  "query.notVideo": "Dieser YouTube-Link ist kein Video",
+  "yt.nothingFound": "Nichts gefunden",
+  "yt.failed": "Das Video ließ sich nicht laden",
+  "yt.liveFailed": "Der Livestream ließ sich nicht laden",
+  "yt.playlistEmpty": "Diese Playlist enthält keine abspielbaren Videos",
+  "yt.signIn": "YouTube verlangt, dass sich der Server anmeldet",
+  "yt.private": "Dieses Video ist privat",
+  "yt.ageRestricted": "Dieses Video hat eine Altersbeschränkung",
+  "yt.members": "Dieses Video ist nur für Kanalmitglieder",
+  "yt.notStarted": "Das hat noch nicht angefangen",
+  "yt.unavailable": "Dieses Video ist nicht verfügbar",
+  "yt.tooLarge": "Dieses Video ist zu groß",
+};
+
+const pl: Record<TMessageKey, string> = {
+  "ui.watch": "Oglądajcie razem",
+  "ui.placeholder": "Link do YouTube lub wyszukiwanie",
+  "ui.add": "Dodaj",
+  "ui.lock": "Zablokuj",
+  "ui.unlock": "Odblokuj",
+  "ui.locked": "Zablokowane",
+  "ui.play": "Odtwórz",
+  "ui.pause": "Pauza",
+  "ui.skip": "Pomiń",
+  "ui.stop": "Zatrzymaj",
+  "ui.position": "Pozycja",
+  "ui.loading": "Wczytywanie",
+  "ui.live": "NA ŻYWO",
+  "ui.playlist": "Playlista",
+  "ui.remove": "Usuń {title}",
+  "ui.move": "Przesuń {title}",
+  "ui.clear": "Wyczyść kolejkę",
+  "error.generic": "Coś poszło nie tak",
+  "error.joinVoice": "Najpierw dołącz do kanału głosowego",
+  "error.locked": "Teraz sterować mogą tylko moderatorzy",
+  "error.lockModerators": "Tylko moderatorzy mogą zablokować odtwarzacz",
+  "error.unknownControl": "Nieznane polecenie",
+  "error.closed": "Ten kanał głosowy został zamknięty",
+  "error.nothingPlaying": "Nic nie jest odtwarzane",
+  "error.stillLoading": "Jeszcze się wczytuje",
+  "error.queueFull": "Kolejka jest pełna",
+  "error.queueFullSome": "Kolejka jest pełna: dodano {count} z {total} filmów",
+  "error.slots": "Na tym serwerze odtwarza się zbyt wiele filmów",
+  "error.tooLong": "Filmy mogą trwać najwyżej {minutes} min",
+  "error.someTooLong": "Pominięto filmy dłuższe niż {minutes} min",
+  "error.livePause": "Transmisji na żywo nie można wstrzymać",
+  "error.liveSeek": "W transmisji na żywo nie można przewijać",
+  "error.liveDropping": "Transmisja na żywo ciągle się zrywa",
+  "error.playback": "Odtwarzanie nie powiodło się",
+  "error.tools": "Nie udało się zainstalować yt-dlp lub ffmpeg, zobacz dziennik wtyczki",
+  "error.ffmpeg": "ffmpeg nie jest jeszcze zainstalowany",
+  "error.disk": "Na serwerze skończyło się miejsce",
+  "query.empty": "Wklej link do YouTube lub wpisz wyszukiwanie",
+  "query.tooLong": "To jest za długie",
+  "query.badLink": "Ten link wygląda na niepoprawny",
+  "query.notYouTube": "Działają tylko linki do YouTube",
+  "query.notVideo": "Ten link do YouTube nie prowadzi do filmu",
+  "yt.nothingFound": "Nic nie znaleziono",
+  "yt.failed": "Nie udało się wczytać filmu",
+  "yt.liveFailed": "Nie udało się wczytać transmisji",
+  "yt.playlistEmpty": "Ta playlista nie ma filmów do odtworzenia",
+  "yt.signIn": "YouTube wymaga, aby serwer się zalogował",
+  "yt.private": "Ten film jest prywatny",
+  "yt.ageRestricted": "Ten film ma ograniczenie wiekowe",
+  "yt.members": "Ten film jest tylko dla członków kanału",
+  "yt.notStarted": "To jeszcze się nie zaczęło",
+  "yt.unavailable": "Ten film jest niedostępny",
+  "yt.tooLarge": "Ten film jest za duży",
+};
+
+const CATALOGS: Record<string, Record<TMessageKey, string>> = { en, de, pl };
+export const LANGUAGES = Object.keys(CATALOGS);
+
+export const isMessageKey = (key: unknown): key is TMessageKey => typeof key === "string" && Object.hasOwn(en, key);
+
+export const translate = (language: string, key: TMessageKey, params?: TMessage["params"]): string => {
+  const text = (CATALOGS[language] ?? en)[key] ?? en[key] ?? key;
+  return params ? text.replace(/\{(\w+)\}/g, (match, name: string) => String(params[name] ?? match)) : text;
+};
+
+/**
+ * The browser's language, when it is one of ours. Sharkord's own setting is no
+ * guide: it has no German or Polish, and saves English on first start.
+ */
+export const pickLanguage = (browser: readonly string[]): string => {
+  for (const tag of browser) {
+    const code = tag.toLowerCase().split("-")[0]!;
+    if (LANGUAGES.includes(code)) return code;
+  }
+  return "en";
+};

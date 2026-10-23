@@ -44,22 +44,37 @@ exit 0`,
     expect(code).toBe("1");
   });
 
-  it("accepts the download's arguments", async () => {
-    const video: TResolved = {
-      videoId: "dQw4w9WgXcQ",
-      title: "t",
-      duration: 1,
-      live: false,
-      start: 0,
-      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      format: "136+251/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
-      fps: 30,
-    };
-    await youtube.download(video, dir, () => {}, new AbortController().signal).catch(() => {});
+  const video: TResolved = {
+    videoId: "dQw4w9WgXcQ",
+    title: "t",
+    duration: 1,
+    live: false,
+    start: 0,
+    url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    parts: { video: { formatId: "136", format: "136/bv[height<=720]", ext: "mp4", size: null }, audio: { formatId: "251", format: "251/ba", ext: "webm", size: null } },
+    format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
+    fps: 30,
+  };
+  const parsed = () => {
     const { code, output } = accepted();
     expect(output).not.toContain("Usage:");
     expect(code).toBe("1");
+  };
+
+  it("accepts the arguments of a single format's download", async () => {
+    await youtube.downloadPart(video, video.parts!.video, path.join(dir, "video.mp4"), () => {}, new AbortController().signal).catch(() => {});
+    parsed();
+  });
+
+  it("accepts the arguments of a merged download", async () => {
+    await youtube.downloadMerged(video, dir, () => {}, new AbortController().signal).catch(() => {});
+    parsed();
     // each run used its own copy of the cookies, and removed it
     expect(readdirSync(dir).filter((name) => name.startsWith("cookies-"))).toEqual([]);
+  });
+
+  it("accepts the arguments of a playlist lookup", async () => {
+    await youtube.playlist("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf", new AbortController().signal).catch(() => {});
+    parsed();
   });
 });

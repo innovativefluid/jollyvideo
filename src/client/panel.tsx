@@ -1,12 +1,14 @@
 /** The popover: add a video, control the one playing, see what is next. */
-import { Lock, LockOpen, LoaderCircle, Pause, Play, Plus, SkipForward, Square, X } from "lucide-react";
+import { Lock, LockOpen, LoaderCircle, Pause, Play, Plus, SkipForward, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { MAX_QUERY_LENGTH, type TControl, type TNowPlaying, type TQueueEntry } from "../contract";
+import { MAX_QUERY_LENGTH, type TControl, type TNowPlaying } from "../contract";
 import { cls } from "./classes";
 import { formatTime } from "./format";
+import { Queue } from "./queue";
 import { SeekBar } from "./seek-bar";
 import { add, control, getView, positionOf, refresh, subscribe } from "./store";
+import { say, t } from "./text";
 
 const WIDTH = 320;
 const GAP = 8;
@@ -39,7 +41,7 @@ const place = (anchor: HTMLElement | null): TPlace => {
 
 const samePlace = (a: TPlace, b: TPlace) => a.side === b.side && a.left === b.left && a.width === b.width && a.top === b.top && a.bottom === b.bottom && a.maxHeight === b.maxHeight;
 
-const send = (op: TControl) => () => void control(op);
+const send = (op: TControl) => void control(op);
 
 const IconButton = (props: { label: string; onClick(): void; disabled?: boolean; children: ReactNode }) => (
   <button type="button" className={cls.iconButton} title={props.label} aria-label={props.label} disabled={props.disabled} onClick={props.onClick}>
@@ -54,21 +56,21 @@ const AddRow = (props: { canControl: boolean; canModerate: boolean; locked: bool
     const query = text.trim();
     if (query && (await add(query))) setText("");
   };
-  const lockLabel = props.locked ? "Unlock" : "Lock";
+  const lockLabel = props.locked ? t("ui.unlock") : t("ui.lock");
   return (
     <form className={cls.row} onSubmit={submit}>
       <input
         className={cls.input}
         value={text}
         onChange={(event) => setText(event.target.value)}
-        placeholder="YouTube link or search"
-        aria-label="YouTube link or search"
+        placeholder={t("ui.placeholder")}
+        aria-label={t("ui.placeholder")}
         maxLength={MAX_QUERY_LENGTH}
         spellCheck={false}
         autoFocus
         disabled={!props.canControl}
       />
-      <button type="submit" className={cls.iconButton} title="Add" aria-label="Add" disabled={!props.canControl || props.busy || !text.trim()}>
+      <button type="submit" className={cls.iconButton} title={t("ui.add")} aria-label={t("ui.add")} disabled={!props.canControl || props.busy || !text.trim()}>
         <Plus />
       </button>
       {props.canModerate ? (
@@ -79,12 +81,12 @@ const AddRow = (props: { canControl: boolean; canModerate: boolean; locked: bool
           aria-label={lockLabel}
           aria-pressed={props.locked}
           disabled={props.busy}
-          onClick={send({ op: "lock", locked: !props.locked })}
+          onClick={() => send({ op: "lock", locked: !props.locked })}
         >
           {props.locked ? <Lock /> : <LockOpen />}
         </button>
       ) : props.locked ? (
-        <span className={cls.lockedMark} role="img" title="Only moderators can control this right now" aria-label="Locked">
+        <span className={cls.lockedMark} role="img" title={t("error.locked")} aria-label={t("ui.locked")}>
           <Lock className={cls.icon} />
         </span>
       ) : null}
@@ -97,18 +99,24 @@ const Status = ({ now, position }: { now: TNowPlaying; position: number }) => {
     return (
       <span className={cls.row}>
         {now.progress !== null && <span className={cls.meta}>{Math.round(now.progress * 100)}%</span>}
-        <LoaderCircle className={cls.spinner} role="img" aria-label="Loading" />
+        <LoaderCircle className={cls.spinner} role="img" aria-label={t("ui.loading")} />
       </span>
     );
   }
-  if (now.live) return <span className={cls.liveBadge}>LIVE</span>;
+  if (now.live) return <span className={cls.liveBadge}>{t("ui.live")}</span>;
   return <span className={cls.meta}>{`${formatTime(position)} / ${formatTime(now.duration)}`}</span>;
+};
+
+/** the video's thumbnail, or an empty frame when there is none or it fails to load */
+const Thumbnail = ({ src }: { src: string }) => {
+  const [failed, setFailed] = useState<string | null>(null);
+  return src && failed !== src ? <img src={src} alt="" className={cls.thumbnail} onError={() => setFailed(src)} /> : <div className={cls.thumbnail} />;
 };
 
 const NowPlaying = ({ now, position, canControl }: { now: TNowPlaying; position: number; canControl: boolean }) => (
   <>
     <div className={cls.nowPlaying}>
-      {now.thumbnail ? <img src={now.thumbnail} alt="" className={cls.thumbnail} /> : <div className={cls.thumbnail} />}
+      <Thumbnail src={now.thumbnail} />
       <div className={cls.nowText}>
         <p className={cls.title} title={now.title}>
           {now.title}
@@ -116,53 +124,35 @@ const NowPlaying = ({ now, position, canControl }: { now: TNowPlaying; position:
       </div>
     </div>
     {!now.live && now.duration > 0 && (
-      <SeekBar position={position} duration={now.duration} disabled={!canControl} onSeek={(at) => void control({ op: "seek", position: Math.floor(at) })} />
+      <SeekBar
+        position={position}
+        duration={now.duration}
+        buffered={now.progress}
+        disabled={!canControl}
+        onSeek={(at) => send({ op: "seek", position: Math.floor(at) })}
+      />
     )}
     <div className={cls.controls}>
       {!now.live &&
         (now.state === "paused" ? (
-          <IconButton label="Play" disabled={!canControl} onClick={send({ op: "resume" })}>
+          <IconButton label={t("ui.play")} disabled={!canControl} onClick={() => send({ op: "resume" })}>
             <Play />
           </IconButton>
         ) : (
-          <IconButton label="Pause" disabled={!canControl || now.state !== "playing"} onClick={send({ op: "pause" })}>
+          <IconButton label={t("ui.pause")} disabled={!canControl || now.state !== "playing"} onClick={() => send({ op: "pause" })}>
             <Pause />
           </IconButton>
         ))}
-      <IconButton label="Skip" disabled={!canControl} onClick={send({ op: "skip" })}>
+      <IconButton label={t("ui.skip")} disabled={!canControl} onClick={() => send({ op: "skip" })}>
         <SkipForward />
       </IconButton>
-      <IconButton label="Stop" disabled={!canControl} onClick={send({ op: "stop" })}>
+      <IconButton label={t("ui.stop")} disabled={!canControl} onClick={() => send({ op: "stop" })}>
         <Square />
       </IconButton>
       <span className={cls.grow} />
       <Status now={now} position={position} />
     </div>
   </>
-);
-
-const queueMeta = (entry: TQueueEntry): ReactNode => {
-  if (entry.state === "resolving") return <LoaderCircle className={cls.spinner} role="img" aria-label="Loading" />;
-  if (entry.progress !== null) return `${Math.round(entry.progress * 100)}%`;
-  return entry.live ? "LIVE" : formatTime(entry.duration);
-};
-
-const Queue = ({ queue, canControl }: { queue: TQueueEntry[]; canControl: boolean }) => (
-  <ul className={cls.queue}>
-    {queue.map((entry) => (
-      <li key={entry.id} className={cls.queueRow}>
-        <span className={cls.queueMeta}>{queueMeta(entry)}</span>
-        <span className={cls.queueTitle} title={entry.title}>
-          {entry.title}
-        </span>
-        {canControl && (
-          <button type="button" className={cls.smallIconButton} title="Remove" aria-label={`Remove ${entry.title}`} onClick={send({ op: "remove", id: entry.id })}>
-            <X />
-          </button>
-        )}
-      </li>
-    ))}
-  </ul>
 );
 
 export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | null>; onClose(): void }) => {
@@ -172,10 +162,11 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
 
   // follows the button when the window or the layout around it changes
   useLayoutEffect(() => {
-    const update = () => setWhere((old) => {
-      const next = place(anchor.current);
-      return samePlace(old, next) ? old : next;
-    });
+    const update = () =>
+      setWhere((old) => {
+        const next = place(anchor.current);
+        return samePlace(old, next) ? old : next;
+      });
     update();
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
     observer?.observe(document.body);
@@ -220,7 +211,7 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
     <div
       ref={panel}
       role="dialog"
-      aria-label="Watch together"
+      aria-label={t("ui.watch")}
       data-state="open"
       data-side={where.side}
       className={cls.panel}
@@ -228,10 +219,10 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
     >
       <AddRow canControl={canControl} canModerate={view.canModerate} locked={locked} busy={view.busy} />
       {now && <NowPlaying now={now} position={positionOf(view)} canControl={canControl} />}
-      {player && player.queue.length > 0 && <Queue queue={player.queue} canControl={canControl} />}
+      {player && player.queue.length > 0 && <Queue queue={player.queue} canControl={canControl} send={send} />}
       {error && (
         <p className={cls.error} role="alert">
-          {error}
+          {say(error)}
         </p>
       )}
     </div>,

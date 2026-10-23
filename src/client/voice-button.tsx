@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cls } from "./classes";
 import { Panel } from "./panel";
 import { start } from "./store";
+import { t } from "./text";
 
 export const VoiceButton = () => {
   const [open, setOpen] = useState(false);
@@ -18,8 +19,8 @@ export const VoiceButton = () => {
         ref={button}
         type="button"
         className={cls.trigger}
-        title="Watch together"
-        aria-label="Watch together"
+        title={t("ui.watch")}
+        aria-label={t("ui.watch")}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
