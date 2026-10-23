@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # the Bun Sharkord runs on
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+      - run: bun run sharkord
+      - run: bun run check
+      - run: bun run test
+
+      - name: ffmpeg and yt-dlp for the media tests
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ffmpeg.tar.gz" https://github.com/diogomartino/plugin-binaries/releases/download/0.0.1/ffmpeg-linux-x64.tar.gz
+          echo "da7f697fc9eaf4c878d4fc7d2dde589538b6856467aa81890afaab0a28114b42  $RUNNER_TEMP/ffmpeg.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/ffmpeg.tar.gz" -C "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/ffmpeg-linux-x64"
+          echo "JOLLYVIDEO_FFMPEG=$RUNNER_TEMP/ffmpeg-linux-x64" >> "$GITHUB_ENV"
+          pipx install yt-dlp
+      - run: bun run test:media
+
+      # GitHub's API limits anonymous calls, so this one may not block
+      - run: bun run test:network
+        continue-on-error: true
+
+      - run: bun run build
+      - run: bun run test:package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jollyvideo
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256

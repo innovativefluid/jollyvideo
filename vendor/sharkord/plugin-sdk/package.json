@@ -1,0 +1,12 @@
+{
+  "name": "@sharkord/plugin-sdk",
+  "version": "0.0.28",
+  "private": true,
+  "type": "module",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": { "types": "./src/index.d.ts" },
+    "./client": { "types": "./src/client.d.ts" }
+  },
+  "license": "MIT"
+}

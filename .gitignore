@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.sharkord/
+*.log
+.DS_Store

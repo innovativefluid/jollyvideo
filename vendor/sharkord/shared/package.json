@@ -1,0 +1,8 @@
+{
+  "name": "@sharkord/shared",
+  "version": "0.0.28",
+  "private": true,
+  "type": "module",
+  "types": "src/index.d.ts",
+  "license": "MIT"
+}

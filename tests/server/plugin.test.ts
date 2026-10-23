@@ -1,0 +1,148 @@
+/**
+ * The server half loaded the way Sharkord loads it, with stand-in tools: a
+ * yt-dlp script, an ffmpeg script that only reports progress, and a real
+ * mediasoup router.
+ */
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "fs";
+import * as mediasoup from "mediasoup";
+import type { Router, Worker } from "mediasoup/types";
+import os from "os";
+import path from "path";
+import type { TPlayer, TViewer } from "../../src/contract";
+import { onLoad, onUnload } from "../../src/server/index";
+import { fakeHost, fakeYtDlp, script } from "../helpers/fake-host";
+import { SHARKORD_CODECS } from "../helpers/sharkord";
+
+const dir = mkdtempSync(path.join(os.tmpdir(), "jv-server-"));
+let worker: Worker;
+let router: Router;
+let host: ReturnType<typeof fakeHost>;
+
+const CHANNEL = 5;
+const USER = 1;
+const MODERATOR = 9;
+
+const waitFor = async <T>(read: () => T | undefined, timeoutMs = 5000): Promise<T> => {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const value = read();
+    if (value !== undefined) return value;
+    await Bun.sleep(10);
+  }
+  throw new Error("timed out");
+};
+const lastPush = () => host.pushes.findLast((push) => push.channelId === CHANNEL)?.data as TPlayer | undefined;
+
+beforeAll(async () => {
+  process.env.JOLLYVIDEO_YT_DLP = fakeYtDlp(dir, {
+    id: "dQw4w9WgXcQ",
+    title: "Test video",
+    duration: 120,
+    formats: [
+      { format_id: "136", vcodec: "avc1", acodec: "none", height: 720, fps: 30, protocol: "https" },
+      { format_id: "251", vcodec: "none", acodec: "opus", abr: 130, protocol: "https" },
+    ],
+  });
+  // reports a second of progress, then waits to be stopped
+  process.env.JOLLYVIDEO_FFMPEG = script(dir, "ffmpeg", "echo out_time_us=1000000\nexec sleep 60");
+  worker = await mediasoup.createWorker({ logLevel: "error" });
+  router = await worker.createRouter({ mediaCodecs: SHARKORD_CODECS });
+  host = fakeHost({ router, moderators: [MODERATOR], dataPath: path.join(dir, "data") });
+  await onLoad(host.ctx as never);
+});
+
+afterAll(() => {
+  onUnload();
+  worker.close();
+  delete process.env.JOLLYVIDEO_YT_DLP;
+  delete process.env.JOLLYVIDEO_FFMPEG;
+  rmSync(dir, { recursive: true, force: true });
+});
+
+describe("the server half", () => {
+  it("registers its actions, commands, route and button", () => {
+    expect([...host.actions.keys()]).toEqual(["state", "add", "control"]);
+    expect([...host.actions.values()].every((action) => action.requires === "JOIN_VOICE_CHANNELS")).toBe(true);
+    expect(Object.fromEntries([...host.commands].map(([name, command]) => [name, command.requires]))).toEqual({
+      watch: "JOIN_VOICE_CHANNELS",
+      "watch-skip": "JOIN_VOICE_CHANNELS",
+      "watch-stop": "JOIN_VOICE_CHANNELS",
+      "watch-lock": "MOVE_MEMBERS",
+      "watch-update": "MANAGE_PLUGINS",
+    });
+    expect(host.commands.get("watch-update")!.ephemeral).toBe(true);
+    expect([...host.routes.keys()]).toEqual(["/thumb/*"]);
+    expect([...host.events.keys()]).toEqual(["voice:runtime_closed"]);
+    expect(host.ui()).toEqual({ voice_controls: "JOIN_VOICE_CHANNELS" });
+    expect([...host.settings.keys()]).toEqual(["quality", "maxMinutes", "maxStreams", "updateYtDlp"]);
+  });
+
+  it("only works from a voice channel", async () => {
+    expect(await host.action("state", USER, undefined)).toBeNull();
+    expect(await host.action("state", USER, CHANNEL)).toEqual({
+      player: { channelId: CHANNEL, now: null, queue: [], locked: false, error: null },
+      canModerate: false,
+    });
+    await expect(host.action("add", USER, undefined, { query: "x" })).rejects.toThrow("Join a voice channel first");
+  });
+
+  it("plays what someone adds, as a stream in the channel", async () => {
+    const viewer = (await host.action("add", USER, CHANNEL, { query: "https://youtu.be/dQw4w9WgXcQ" })) as TViewer;
+    expect(viewer.player.now).toMatchObject({ state: "loading" });
+    const playing = await waitFor(() => (lastPush()?.now?.state === "playing" ? lastPush() : undefined));
+    expect(playing.now).toMatchObject({ title: "Test video", duration: 120, thumbnail: "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg" });
+    expect(host.streams).toHaveLength(1);
+    expect(host.streams[0]!.options).toMatchObject({ channelId: CHANNEL, title: "Test video", bannerUrl: "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg" });
+  });
+
+  it("serves no thumbnail it was not asked for", async () => {
+    let status = 0;
+    const res = { writeHead: (code: number) => ((status = code), res), end: () => res };
+    await host.routes.get("/thumb/*")!({ url: "/plugins/jollyvideo/thumb/AAAAAAAAAAA.jpg" } as never, res as never);
+    expect(status).toBe(404);
+  });
+
+  it("lets only moderators lock, and then only them control", async () => {
+    await expect(host.action("control", USER, CHANNEL, { op: "lock", locked: true })).rejects.toThrow("Only moderators can lock the player");
+    const locked = (await host.action("control", MODERATOR, CHANNEL, { op: "lock", locked: true })) as TViewer;
+    expect(locked).toMatchObject({ player: { locked: true }, canModerate: true });
+    await expect(host.action("control", USER, CHANNEL, { op: "pause" })).rejects.toThrow("Only moderators can control this right now");
+    await expect(host.action("add", USER, CHANNEL, { query: "more" })).rejects.toThrow("Only moderators can control this right now");
+    await expect(host.command("watch-skip", USER, CHANNEL)).rejects.toThrow("Only moderators");
+    const paused = (await host.action("control", MODERATOR, CHANNEL, { op: "pause" })) as TViewer;
+    expect(paused.player.now?.state).toBe("paused");
+    expect(await host.command("watch-lock", MODERATOR, CHANNEL)).toBe("Unlocked");
+    const resumed = (await host.action("control", USER, CHANNEL, { op: "resume" })) as TViewer;
+    expect(resumed.player.now?.state).toBe("loading");
+    await waitFor(() => (lastPush()?.now?.state === "playing" ? true : undefined));
+  });
+
+  it("swaps the stream's producers after a seek", async () => {
+    const before = host.streams[0]!.updates.length;
+    await host.action("control", USER, CHANNEL, { op: "seek", position: 60 });
+    await waitFor(() => (host.streams[0]!.updates.length > before ? true : undefined));
+    expect(host.streams[0]!.updates.at(-1)).toMatchObject({ title: "Test video" });
+    expect(host.streams[0]!.updates.at(-1)!.producers).toBeDefined();
+  });
+
+  it("refuses unknown controls and keeps unexpected errors vague", async () => {
+    await expect(host.action("control", USER, CHANNEL, { op: "rm -rf" })).rejects.toThrow("Unknown control");
+    host.failPermissions(new Error("database is down"));
+    await expect(host.action("state", USER, CHANNEL)).rejects.toThrow("Something went wrong");
+    host.failPermissions(null);
+    expect(host.logs.some((line) => line.includes("database is down"))).toBe(true);
+  });
+
+  it("takes the stream down and forgets the lock when the voice channel closes", async () => {
+    await host.action("control", MODERATOR, CHANNEL, { op: "lock", locked: true });
+    (host.events.get("voice:runtime_closed") as (payload: { channelId: number }) => void)({ channelId: CHANNEL });
+    expect(host.streams[0]!.removed).toBe(true);
+    expect(((await host.action("state", USER, CHANNEL)) as TViewer).player).toEqual({ channelId: CHANNEL, now: null, queue: [], locked: false, error: null });
+  });
+
+  it("answers /watch in the chat", async () => {
+    expect(await host.command("watch", USER, CHANNEL, { query: "never gonna" })).toBe("Added");
+    expect(await host.command("watch-stop", USER, CHANNEL)).toBe("Stopped");
+  });
+});

@@ -1,0 +1,8 @@
+{
+  "id": "jollyvideo",
+  "name": "Jollyvideo",
+  "author": "innovativefluid",
+  "description": "Watch YouTube videos and livestreams together in voice channels",
+  "sdkVersion": 2,
+  "version": "0.2.0"
+}
