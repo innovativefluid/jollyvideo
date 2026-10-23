@@ -7,6 +7,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import * as React from "react";
+import * as ReactDOM from "react-dom";
+import * as ReactDOMClient from "react-dom/client";
 import * as JSX from "react/jsx-runtime";
 import manifest from "../../manifest.json";
 import { fakeHost, fakeYtDlp, script } from "../helpers/fake-host";
@@ -44,7 +46,13 @@ it("loads and unloads its server half", async () => {
 
 it("hands Sharkord one voice controls button, on Sharkord's React", async () => {
   const globals = globalThis as Record<string, unknown>;
-  globals.window = { __SHARKORD_REACT__: React, __SHARKORD_REACT_JSX__: JSX };
+  // what Sharkord puts on window before it loads a plugin
+  globals.window = {
+    __SHARKORD_REACT__: React,
+    __SHARKORD_REACT_JSX__: JSX,
+    __SHARKORD_REACT_DOM__: ReactDOM,
+    __SHARKORD_REACT_DOM_CLIENT__: ReactDOMClient,
+  };
   const client = await import(path.join(dir, manifest.id, "client/index.js"));
   expect(Object.keys(client.components)).toEqual(["voice_controls"]);
   expect(client.components.voice_controls).toHaveLength(1);
