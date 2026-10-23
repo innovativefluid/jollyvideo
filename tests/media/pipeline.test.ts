@@ -225,11 +225,14 @@ describe("a livestream", () => {
 
 describe("the whole plugin", () => {
   const withPlugin = async (info: Parameters<typeof fakeYtDlp>[1], env: Record<string, string>, body: (host: ReturnType<typeof fakeHost>) => Promise<void>) => {
-    Object.assign(process.env, env, { JOLLYVIDEO_YT_DLP: fakeYtDlp(dir, info), JOLLYVIDEO_FFMPEG: ffmpeg });
+    Object.assign(process.env, env, { JOLLYVIDEO_YT_DLP: fakeYtDlp(dir, info, env), JOLLYVIDEO_FFMPEG: ffmpeg });
     const host = fakeHost({ router, dataPath: path.join(dir, `data-${crypto.randomUUID()}`) });
     try {
       await onLoad(host.ctx as never);
       await body(host);
+    } catch (error) {
+      console.log(host.logs.join("\n"));
+      throw error;
     } finally {
       await onUnload();
       for (const key of [...Object.keys(env), "JOLLYVIDEO_YT_DLP", "JOLLYVIDEO_FFMPEG"]) delete process.env[key];
@@ -275,8 +278,10 @@ describe("the whole plugin", () => {
       expect(playing.progress).toBeGreaterThan(0.75);
       expect(playing.progress).toBeLessThan(1);
       const producers = host.streams[0]!.options.producers as { audio: Producer; video: Producer };
-      const frames = await measure(producers.video, 2000);
+      const [frames, sound] = await Promise.all([measure(producers.video, 2000), measure(producers.audio, 2000)]);
       expect(frames.frames).toBeGreaterThan(40);
+      // the WebM's Opus, passed through: 20 ms packets
+      expect(sound.packets).toBeGreaterThan(80);
       // plays to the end while the rest arrives, then takes the stream down
       expect(await until(() => host.streams[0]!.removed, 40_000)).toBe(true);
       expect(await until(() => latest(host)?.now === null, 2_000)).toBe(true);

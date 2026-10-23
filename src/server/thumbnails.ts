@@ -4,7 +4,8 @@
  * kept in memory.
  *
  * The route has to be public (an <img> sends no token), so its URLs carry a
- * random key made at load: without it nobody can ask which videos were played.
+ * random key per voice channel, made at load: without it nobody can ask which
+ * videos were played, and with one, only about that channel.
  */
 import type { IncomingMessage, ServerResponse } from "http";
 
@@ -15,11 +16,14 @@ const RETRY_AFTER_MS = 5 * 60_000;
 
 type TLog = { error(...args: unknown[]): void };
 
+const randomKey = () => Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+
 export class Thumbnails {
   /** video id → image, or the fetch still running; oldest first */
   private readonly kept = new Map<string, Promise<Uint8Array | null>>();
+  /** "key/video id" of the videos shown; oldest first */
   private readonly allowed = new Set<string>();
-  private readonly key = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+  private readonly keys = new Map<number, string>();
 
   constructor(
     private readonly base: string,
@@ -27,16 +31,19 @@ export class Thumbnails {
     private readonly fetchImage: (videoId: string) => Promise<Uint8Array | null> = fetchFromYouTube,
   ) {}
 
-  /** allows the video's thumbnail and returns the URL to show it with */
-  url(videoId: string): string {
-    this.allowed.delete(videoId);
-    this.allowed.add(videoId);
-    while (this.allowed.size > MAX_KEPT) {
-      const oldest = this.allowed.values().next().value as string;
-      this.allowed.delete(oldest);
-      this.kept.delete(oldest);
+  /** allows the video's thumbnail in a voice channel and returns the URL to show it with */
+  url(channelId: number, videoId: string): string {
+    let key = this.keys.get(channelId);
+    if (!key) {
+      key = randomKey();
+      this.keys.set(channelId, key);
     }
-    return `${this.base}/thumb/${this.key}/${videoId}.jpg`;
+    const entry = `${key}/${videoId}`;
+    this.allowed.delete(entry);
+    this.allowed.add(entry);
+    while (this.allowed.size > MAX_KEPT) this.allowed.delete(this.allowed.values().next().value as string);
+    while (this.kept.size > MAX_KEPT) this.kept.delete(this.kept.keys().next().value as string);
+    return `${this.base}/thumb/${entry}.jpg`;
   }
 
   private image(videoId: string): Promise<Uint8Array | null> {
@@ -56,8 +63,7 @@ export class Thumbnails {
 
   handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const match = /\/thumb\/([0-9a-f]{32})\/([\w-]{11})\.jpg$/.exec(new URL(req.url ?? "/", "http://x").pathname);
-    const videoId = match?.[1] === this.key ? match[2] : undefined;
-    const bytes = videoId && this.allowed.has(videoId) ? await this.image(videoId) : null;
+    const bytes = match && this.allowed.has(`${match[1]}/${match[2]}`) ? await this.image(match[2]!) : null;
     if (!bytes) {
       res.writeHead(404, { "Cache-Control": "no-store" }).end();
       return;
@@ -78,9 +84,18 @@ const fetchFromYouTube = async (videoId: string): Promise<Uint8Array | null> => 
     signal: AbortSignal.timeout(10_000),
     redirect: "error",
   });
-  if (!response.ok) return null;
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!response.ok || !response.body) return null;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.byteLength;
+    if (size > MAX_BYTES) {
+      await response.body.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
   // JPEG files start with FF D8
-  if (bytes.byteLength > MAX_BYTES || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
-  return bytes;
+  return bytes[0] === 0xff && bytes[1] === 0xd8 ? new Uint8Array(bytes) : null;
 };

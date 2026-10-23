@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+A performance and security pass.
+
+- About a quarter less CPU per video, and YouTube's Opus sound is passed through instead of encoded again.
+- One YouTube lookup per video instead of three; only the next few queued videos are looked up ahead.
+- The next video downloads once the one playing is in, and reordering the queue no longer starts and stops downloads.
+- Stopped downloads no longer leave 80 MB behind in the temp folder each time.
+- Installing ffmpeg needs about 20 MB of memory instead of 400 MB.
+- One channel's lookups no longer hold up the others'.
+- Long searches can no longer stop the panel updating for everyone in the channel.
+- In private voice channels, the stream in the channel list no longer shows the video's title to the whole server.
+- Someone a moderator disconnected can no longer control the player.
+- Videos of unknown length are refused while there is a length limit.
+- yt-dlp sees only the environment it needs, and prefers Deno or Node for YouTube's JavaScript.
+- ffmpeg opens only local files and livestream playlists, in YouTube's formats.
+- Releases are built in a job of their own, with pinned actions and build provenance.
+
 ## 0.3.0
 
 - Videos start playing while they download, after about 20 seconds are in.

@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { formatTime } from "../../src/client/format";
 import { boxWidth, encoderArgs, h264Level, type TEncodeOptions } from "../../src/server/encoder";
 import { parseControl } from "../../src/server/index";
-import { closeWhenEmpty } from "../../src/server/players";
+import { closeWhenEmpty, fitted } from "../../src/server/players";
 import { QUALITIES, readSettings } from "../../src/server/settings";
 import { Thumbnails } from "../../src/server/thumbnails";
 
@@ -48,7 +48,7 @@ describe("encoder arguments", () => {
   it("reads separate video and audio files that are still growing, and stops at the video's end", () => {
     const args = encoderArgs(options({ input: { video: "/c/video.mp4", audio: "/c/audio.webm" }, follow: true, start: 30, length: 171 }));
     const inputs = args.slice(0, args.indexOf("-map"));
-    expect(inputs.join(" ")).toContain("-follow 1 -ss 30 -re -i /c/video.mp4 -follow 1 -ss 30 -re -i /c/audio.webm");
+    expect(inputs.join(" ")).toContain("-follow 1 -ss 30 -re -i /c/video.mp4 -protocol_whitelist file -format_whitelist mov,matroska -follow 1 -ss 30 -re -i /c/audio.webm");
     expect(args[args.indexOf("-map", args.indexOf("rtp://127.0.0.1:5000?pkt_size=1200")) + 1]).toBe("1:a:0");
     expect(args.filter((arg) => arg === "-t")).toHaveLength(2);
     expect(args[args.indexOf("-t") + 1]).toBe("171");
@@ -56,6 +56,21 @@ describe("encoder arguments", () => {
     const done = encoderArgs(options({ input: { video: "/v", audio: "/a" } }));
     expect(done).not.toContain("-follow");
     expect(done).not.toContain("-t");
+  });
+
+  it("opens only local files of YouTube's containers, or a livestream's HLS", () => {
+    const vod = encoderArgs(options());
+    expect(vod.slice(0, vod.indexOf("-i")).join(" ")).toContain("-protocol_whitelist file -format_whitelist mov,matroska");
+    const live = encoderArgs(options({ live: true, input: "https://m/x.m3u8" }));
+    expect(live.slice(0, live.indexOf("-i")).join(" ")).toContain("-protocol_whitelist http,https,httpproxy,tls,tcp,crypto -format_whitelist hls,mpegts,mov,aac");
+  });
+
+  it("passes Opus through, and encodes anything else to Opus", () => {
+    const encoded = encoderArgs(options()).join(" ");
+    expect(encoded).toContain("-c:a libopus -b:a 128k -ar 48000 -ac 2");
+    const copied = encoderArgs(options({ copyAudio: true })).join(" ");
+    expect(copied).toContain("-c:a copy -payload_type 111");
+    expect(copied).not.toContain("libopus");
   });
 
   it("signals a level each quality fits in", () => {
@@ -110,13 +125,14 @@ const request = (url: string) => ({ url }) as IncomingMessage;
 describe("thumbnails", () => {
   const jpeg = new Uint8Array([0xff, 0xd8, 1, 2]);
 
-  it("serves only videos someone queued, behind a key, fetched once", async () => {
+  it("serves only videos someone queued, behind a key per channel, fetched once", async () => {
     const fetched: string[] = [];
     const thumbs = new Thumbnails("/plugins/jollyvideo", console, async (id) => {
       fetched.push(id);
       return jpeg;
     });
-    const url = thumbs.url("dQw4w9WgXcQ");
+    const url = thumbs.url(1, "dQw4w9WgXcQ");
+    const otherChannel = thumbs.url(2, "bbbbbbbbbbb");
     expect(url).toMatch(/^\/plugins\/jollyvideo\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\.jpg$/);
     const key = url.split("/")[4]!;
 
@@ -134,6 +150,9 @@ describe("thumbnails", () => {
       `/plugins/jollyvideo/thumb/${"0".repeat(32)}/dQw4w9WgXcQ.jpg`,
       "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg",
       `/plugins/jollyvideo/thumb/${key}/../x.jpg`,
+      // channel 1's key does not reach channel 2's video
+      `/plugins/jollyvideo/thumb/${key}/bbbbbbbbbbb.jpg`,
+      otherChannel.replace("bbbbbbbbbbb", "dQw4w9WgXcQ"),
     ]) {
       const { res, result } = fakeResponse();
       await thumbs.handle(request(url), res);
@@ -145,7 +164,7 @@ describe("thumbnails", () => {
   it("does not ask YouTube again right after a failure", async () => {
     let calls = 0;
     const thumbs = new Thumbnails("/p", { error() {} }, async () => (++calls === 1 ? null : jpeg));
-    const url = thumbs.url("dQw4w9WgXcQ");
+    const url = thumbs.url(1, "dQw4w9WgXcQ");
     const first = fakeResponse();
     await thumbs.handle(request(url), first.res);
     const second = fakeResponse();
@@ -155,11 +174,25 @@ describe("thumbnails", () => {
 
   it("forgets the oldest of many", async () => {
     const thumbs = new Thumbnails("/p", console, async () => jpeg);
-    const first = thumbs.url("v0000000000");
-    for (let i = 1; i < 201; i++) thumbs.url(`v${String(i).padStart(10, "0")}`);
+    const first = thumbs.url(1, "v0000000000");
+    for (let i = 1; i < 201; i++) thumbs.url(1, `v${String(i).padStart(10, "0")}`);
     const { res, result } = fakeResponse();
     await thumbs.handle(request(first), res);
     expect(result.status).toBe(404);
+  });
+});
+
+describe("fitted", () => {
+  it("shortens the queue until the state fits into one push", () => {
+    const entry = (i: number) => ({ id: String(i), title: "字".repeat(500), duration: 1, live: false, state: "ready" as const, progress: null });
+    const state = { channelId: 1, rev: 1, now: null, queue: Array.from({ length: 50 }, (_, i) => entry(i)), locked: false, error: null };
+    expect(Buffer.byteLength(JSON.stringify(state))).toBeGreaterThan(64 * 1024);
+    const fit = fitted(state);
+    expect(Buffer.byteLength(JSON.stringify(fit))).toBeLessThanOrEqual(60 * 1024);
+    expect(fit.queue.length).toBeGreaterThan(20);
+    expect(fit.queue[0]).toBe(state.queue[0]);
+    const small = { ...state, queue: state.queue.slice(0, 3) };
+    expect(fitted(small)).toBe(small);
   });
 });
 

@@ -32,6 +32,12 @@ await run([
 // like YouTube's: each with its index up front
 await run(["-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=120", "-af", "volume=0.2", "-c:a", "libopus", "-f", "webm", "-dash", "1", "-cues_to_front", "1", audio]);
 
+const fixtures = {
+  JV_FIXTURE_VIDEO: video,
+  JV_FIXTURE_AUDIO: audio,
+  // the video arrives over 5 seconds, so playback starts before it is all in
+  JV_RATE: String(Math.ceil(Bun.file(video).size / 5)),
+};
 const ytDlp = fakeYtDlp(work, {
   id: "jvDemo00001",
   title: "Sunset over the bay",
@@ -42,7 +48,7 @@ const ytDlp = fakeYtDlp(work, {
     { format_id: "v", ext: "mp4", vcodec: "avc1.64001f", acodec: "none", height: 720, fps: 30, protocol: "https", filesize: Bun.file(video).size },
     { format_id: "a", ext: "webm", vcodec: "none", acodec: "opus", abr: 64, protocol: "https", filesize: Bun.file(audio).size },
   ],
-});
+}, fixtures);
 
 // installed like a dropped-in plugin, and switched on
 cpSync(path.join(import.meta.dir, "../dist/jollyvideo"), path.join(data, "plugins/jollyvideo"), { recursive: true });
@@ -62,10 +68,6 @@ db.close();
 
 const env = {
   JOLLYVIDEO_YT_DLP: ytDlp,
-  JV_FIXTURE_VIDEO: video,
-  JV_FIXTURE_AUDIO: audio,
-  // the video arrives over 5 seconds, so playback starts before it is all in
-  JV_RATE: String(Math.ceil(Bun.file(video).size / 5)),
   SHARKORD_WEBRTC_ANNOUNCED_ADDRESS: "127.0.0.1",
 };
 for (const [key, value] of Object.entries(env)) console.log(`${key}=${value}`);

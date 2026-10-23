@@ -27,6 +27,10 @@ export const fakeHost = (options: { router?: Router; moderators?: number[]; data
   let ui: unknown;
   const moderators = new Set(options.moderators ?? []);
   let permissionError: Error | null = null;
+  /** who is in which voice channel: whoever acts in a channel is put in it, unless `disconnect`ed */
+  const members = new Map<number, Set<number>>();
+  const kicked = new Set<string>();
+  const inVoice = (channelId: number) => members.get(channelId) ?? members.set(channelId, new Set()).get(channelId)!;
 
   const ctx = {
     path: "/plugins/jollyvideo",
@@ -59,7 +63,9 @@ export const fakeHost = (options: { router?: Router; moderators?: number[]; data
         return permission === "MOVE_MEMBERS" && moderators.has(userId);
       },
     },
+    channels: { get: async (channelId: number) => ({ id: channelId, private: channelId >= 100 }) },
     voice: {
+      getState: (channelId: number) => ({ users: [...inVoice(channelId)].map((userId) => ({ userId, state: {} })), externalStreams: {} }),
       getRouter: (channelId: number) => {
         if (!options.router) throw new Error(`no voice runtime for channel ${channelId}`);
         return options.router;
@@ -86,7 +92,10 @@ export const fakeHost = (options: { router?: Router; moderators?: number[]; data
     ui: { enable: (requirements: unknown) => (ui = requirements), disable: () => (ui = undefined) },
   };
 
-  const invoker = (userId: number, currentVoiceChannelId?: number) => ({ userId, source: "api", currentVoiceChannelId, locale: "en" });
+  const invoker = (userId: number, currentVoiceChannelId?: number) => {
+    if (currentVoiceChannelId !== undefined && !kicked.has(`${userId}/${currentVoiceChannelId}`)) inVoice(currentVoiceChannelId).add(userId);
+    return { userId, source: "api", currentVoiceChannelId, locale: "en" };
+  };
 
   return {
     ctx,
@@ -101,6 +110,11 @@ export const fakeHost = (options: { router?: Router; moderators?: number[]; data
     ui: () => ui,
     invoker,
     failPermissions: (error: Error | null) => (permissionError = error),
+    /** like ctx.voice.disconnect: out of the channel, while Sharkord still has it as the user's channel */
+    disconnect: (userId: number, channelId: number) => {
+      inVoice(channelId).delete(userId);
+      kicked.add(`${userId}/${channelId}`);
+    },
     action: (name: string, userId: number, channelId: number | undefined, payload?: unknown) =>
       (actions.get(name)!.executes as (...args: unknown[]) => Promise<unknown>)(invoker(userId, channelId), payload),
     command: (name: string, userId: number, channelId: number | undefined, args?: unknown) =>
@@ -127,8 +141,15 @@ export const script = (dir: string, name: string, body: string): string => {
  *   download.
  * - an `-o` with a template merges: `$JV_FIXTURE` (or a placeholder) into
  *   `video.mkv`, and prints its path.
+ *
+ * The JV_ settings are written into the wrapper (`env`, by default those set
+ * now), since the plugin hands yt-dlp only a few environment variables.
  */
-export const fakeYtDlp = (dir: string, info: { formats?: Record<string, unknown>[] } & Record<string, unknown>): string => {
+export const fakeYtDlp = (
+  dir: string,
+  info: { formats?: Record<string, unknown>[] } & Record<string, unknown>,
+  env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[0].startsWith("JV_") && entry[1] !== undefined)),
+): string => {
   const program = path.join(dir, "fake-yt-dlp.ts");
   writeFileSync(
     program,
@@ -168,5 +189,6 @@ console.log("[jv] 100 100 NA");
 console.log(file);
 `,
   );
-  return script(dir, "yt-dlp", `exec "${process.execPath}" "${program}" "$@"`);
+  const exports = Object.entries(env).map(([key, value]) => `export ${key}=${JSON.stringify(value)}\n`).join("");
+  return script(dir, "yt-dlp", `${exports}exec "${process.execPath}" "${program}" "$@"`);
 };

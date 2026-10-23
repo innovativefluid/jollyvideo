@@ -3,7 +3,7 @@
  * and searches only, looked up and downloaded with yt-dlp.
  */
 import { existsSync } from "fs";
-import { chmod, copyFile, rm } from "fs/promises";
+import { chmod, copyFile, mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
 import { MAX_QUERY_LENGTH, MAX_QUEUE } from "../contract";
 import type { TMessageKey } from "../i18n";
@@ -17,9 +17,12 @@ export type TSource =
   | { kind: "playlist"; listId: string }
   | { kind: "search"; text: string };
 
-/** one stream of a video, downloaded on its own so playback can start early */
-/** one format to download; `format` falls back to a similar one if YouTube no longer offers it */
-export type TPart = { formatId: string; format: string; ext: string; size: number | null };
+/**
+ * One stream of a video, downloaded on its own so playback can start early.
+ * `format` falls back to a similar one if YouTube no longer offers it.
+ * `copy`: stereo or mono Opus, which goes to Sharkord as it is.
+ */
+export type TPart = { formatId: string; format: string; codec: string; copy: boolean; ext: string; size: number | null };
 
 export type TResolved = {
   videoId: string;
@@ -39,6 +42,15 @@ export type TResolved = {
   fps: number | null;
   /** livestreams: the HLS playlist to read, and the headers it wants */
   hls?: { url: string; headers: Record<string, string> };
+  /** the lookup's info JSON on disk, so the downloads need not look the video up again */
+  info?: string;
+};
+
+export type TLookupOptions = {
+  /** jumps the queue of lookups: the video is needed now; asked again while it waits */
+  urgent?: boolean | (() => boolean);
+  /** where to keep the lookup's info JSON for the downloads */
+  saveTo?: string;
 };
 
 export type TPlaylistEntry = { videoId: string; title: string; duration: number };
@@ -48,10 +60,27 @@ export type TYtDlp = {
   path: string;
   ffmpeg?: string;
   cookies?: string;
-  /** where each run gets its own copy of the cookies */
+  /** where each run gets a temp folder of its own, with its copy of the cookies; cleared on load */
   scratch: string;
-  jsRuntime: { args: string[]; env: Record<string, string | undefined> };
+  jsRuntime: { args: string[]; env: Record<string, string> };
 };
+
+/**
+ * What yt-dlp and the JavaScript it runs for YouTube get to see of the
+ * server's environment: enough to run and to reach the internet, not
+ * Sharkord's secrets.
+ */
+const PASSED_ENV = /^(PATH|PATHEXT|HOME|USER|LOGNAME|LANG|LANGUAGE|LC_\w+|TZ|XDG_\w+|SYSTEMROOT|WINDIR|COMSPEC|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|(HTTPS?|ALL|NO)_PROXY)$/i;
+
+export const ytDlpEnv = (tools: TYtDlp, tmp: string, from: Record<string, string | undefined> = process.env): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(from)) if (value !== undefined && PASSED_ENV.test(name)) env[name] = value;
+  // PyInstaller unpacks itself into the run's own temp folder, which goes with the run
+  return { ...env, TMPDIR: tmp, TEMP: tmp, TMP: tmp, ...tools.jsRuntime.env };
+};
+
+/** how long a stopped yt-dlp has to clean up before it is killed (proc.ts) and its folder removed */
+const STOP_GRACE_MS = 3_000;
 
 const HOSTS = new Set([
   "youtube.com",
@@ -85,8 +114,11 @@ const toUrl = (text: string): URL | null => {
   return null;
 };
 
+/** control characters: nothing to show, and six bytes each in a push */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
 export const parseQuery = (input: string): TSource => {
-  const text = input.trim().replace(/\s+/g, " ");
+  const text = input.replace(CONTROL, " ").trim().replace(/\s+/g, " ");
   if (!text) throw new UserError("query.empty");
   if (text.length > MAX_QUERY_LENGTH) throw new UserError("query.tooLong");
   const url = toUrl(text);
@@ -150,6 +182,7 @@ type TFormat = {
   url?: string;
   dynamic_range?: string | null;
   language_preference?: number | null;
+  audio_channels?: number | null;
   format_note?: string | null;
   has_drm?: boolean | string;
   http_headers?: Record<string, string>;
@@ -183,18 +216,22 @@ const videoKey = (q: TQuality) => (f: TFormat): TKey => {
   return [height > q.height, height > q.height ? height : -height, (f.dynamic_range ?? "SDR") !== "SDR", fps > q.fps, -Math.min(fps, q.fps), codecRank(f.vcodec), -(f.tbr ?? 0)];
 };
 
-/** the original language over dubs, full range over YouTube's "drc" variant, Opus over AAC */
+/** the original language over dubs, stereo over surround (Sharkord's audio is stereo), full range over YouTube's "drc" variant, Opus over AAC */
 const audioKey = (f: TFormat): TKey => [
   -(f.language_preference ?? 0),
+  (f.audio_channels ?? 2) > 2,
   /drc/i.test(`${f.format_id} ${f.format_note ?? ""}`),
   !(f.acodec ?? "").startsWith("opus"),
   -(f.abr ?? f.tbr ?? 0),
 ];
 
-const SAFE_EXT = /^[a-z0-9]{2,5}$/;
-const part = (f: TFormat, fallback: string): TPart => ({
+/** the containers YouTube serves, as file names; ffmpeg reads the content, not the name */
+const SAFE_EXT = /^(mp4|m4a|webm|mkv|mov|3gp)$/;
+const part = (f: TFormat, fallback: string, copy = false): TPart => ({
   formatId: f.format_id!,
   format: `${f.format_id}/${fallback}`,
+  codec: (hasVideo(f) ? f.vcodec : f.acodec) ?? "",
+  copy,
   ext: SAFE_EXT.test(f.ext ?? "") ? f.ext! : "bin",
   size: f.filesize ?? f.filesize_approx ?? null,
 });
@@ -206,7 +243,13 @@ export const pickFormat = (formats: TFormat[], q: TQuality): Pick<TResolved, "pa
   const audio = best(https.filter((f) => hasAudio(f) && !hasVideo(f)), audioKey);
   if (!video || !audio) return { parts: null, format, fps: null };
   // the download looks the video up again, and YouTube's formats can differ from one lookup to the next
-  return { parts: { video: part(video, `bv[height<=${q.height}]`), audio: part(audio, "ba") }, format, fps: video.fps ?? null };
+  // stereo Opus is passed through to Sharkord as it is (RTP takes no surround Opus), so its stand-in has to be the same
+  const copy = (audio.acodec ?? "").startsWith("opus") && (audio.audio_channels ?? 2) <= 2;
+  return {
+    parts: { video: part(video, `bv[height<=${q.height}]`), audio: part(audio, copy ? "ba[acodec=opus][audio_channels<=?2]" : "ba", copy) },
+    format,
+    fps: video.fps ?? null,
+  };
 };
 
 export const pickLive = (formats: TFormat[], q: TQuality): TFormat | undefined =>
@@ -225,7 +268,10 @@ type TInfo = {
   entries?: unknown;
 };
 
-const titleOf = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 200) : fallback);
+const titleOf = (value: unknown, fallback: string) => {
+  const title = typeof value === "string" ? value.replace(CONTROL, " ").trim() : "";
+  return title ? title.slice(0, 200) : fallback;
+};
 const secondsOf = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0);
 
 export const parseInfo = (stdout: string, source: TSource, q: TQuality): TResolved => {
@@ -241,7 +287,7 @@ export const parseInfo = (stdout: string, source: TSource, q: TQuality): TResolv
   const url = `https://www.youtube.com/watch?v=${videoId}`;
   if (live) {
     const hls = pickLive(formats, q);
-    if (!hls?.url) throw new UserError("yt.liveFailed");
+    if (!hls?.url?.startsWith("https://")) throw new UserError("yt.liveFailed");
     return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} } };
   }
   const duration = secondsOf(info.duration);
@@ -265,7 +311,7 @@ export const parsePlaylist = (stdout: string): TPlaylistEntry[] => {
 export type TProgress = (bytes: number, total: number | null) => void;
 
 export type TYouTube = {
-  resolve(source: TSource, q: TQuality, signal: AbortSignal): Promise<TResolved>;
+  resolve(source: TSource, q: TQuality, signal: AbortSignal, options?: TLookupOptions): Promise<TResolved>;
   playlist(listId: string, signal: AbortSignal): Promise<TPlaylistEntry[]>;
   /** one format into `file`, written in order as it arrives, so it can be read while it grows */
   downloadPart(video: TResolved, part: TPart, file: string, onProgress: TProgress, signal: AbortSignal): Promise<void>;
@@ -292,21 +338,31 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
   const lookups = limiter(LOOKUPS_AT_ONCE);
 
   /**
-   * yt-dlp writes its cookies file back when it exits; runs at the same time,
-   * or one killed halfway, would garble the admin's file. Each run gets a copy.
+   * Each run gets a temp folder of its own: for what yt-dlp unpacks when it
+   * starts (left behind when it is stopped early), and for a copy of the
+   * cookies, since yt-dlp writes its cookies file back when it exits and runs
+   * at the same time, or one killed halfway, would garble the admin's file.
+   * Lookups also run in it, so a JavaScript runtime finds no .env of the
+   * server's there.
    */
   const exec = async (args: string[], options: TRunOptions) => {
     const ytDlp = tools();
-    const cookies = ytDlp.cookies ? path.join(ytDlp.scratch, `cookies-${crypto.randomUUID()}.txt`) : undefined;
+    const tmp = path.join(ytDlp.scratch, crypto.randomUUID());
+    await mkdir(tmp, { recursive: true, mode: 0o700 });
     try {
-      if (cookies) {
-        await copyFile(ytDlp.cookies!, cookies);
+      let cookieArgs: string[] = [];
+      if (ytDlp.cookies) {
+        const cookies = path.join(tmp, "cookies.txt");
+        await copyFile(ytDlp.cookies, cookies);
         await chmod(cookies, 0o600);
+        cookieArgs = ["--cookies", cookies];
       }
-      const cookieArgs = cookies ? ["--cookies", cookies] : [];
-      return await run([ytDlp.path, ...commonArgs(ytDlp), ...cookieArgs, ...args], { ...options, env: ytDlp.jsRuntime.env });
+      return await run([ytDlp.path, ...commonArgs(ytDlp), ...cookieArgs, ...args], { cwd: tmp, ...options, env: ytDlpEnv(ytDlp, tmp) });
     } finally {
-      if (cookies) await rm(cookies, { force: true });
+      const remove = () => rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+      await remove();
+      // a stopped run's last processes may still be cleaning up
+      setTimeout(remove, STOP_GRACE_MS).unref?.();
     }
   };
 
@@ -316,12 +372,23 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
   };
 
   const downloadArgs = ["--max-filesize", "8G", "--no-part", "--progress", "--newline", "--progress-template", PROGRESS_TEMPLATE];
+  /** the lookup's info JSON when there is one (no second lookup), the video's page otherwise */
+  const videoArgs = (video: TResolved, cwd: string) => (video.info ? ["--load-info-json", path.relative(cwd, video.info)] : ["--", video.url]);
 
   return {
-    async resolve(source, q, signal) {
-      const result = await lookups(() => exec(["--no-playlist", "--no-progress", "-j", "--", sourceArg(source)], { signal, timeoutMs: 90_000 }), signal);
+    async resolve(source, q, signal, options = {}) {
+      const result = await lookups(
+        () => exec(["--no-playlist", "--no-progress", "-j", "--", sourceArg(source)], { signal, timeoutMs: 90_000 }),
+        signal,
+        options.urgent,
+      );
       if (result.code !== 0 && !result.stdout.startsWith("{")) fail(result.stderr);
-      return parseInfo(result.stdout, source, q);
+      const video = parseInfo(result.stdout, source, q);
+      if (options.saveTo && !video.live) {
+        await writeFile(options.saveTo, result.stdout.split("\n").find((line) => line.startsWith("{"))!);
+        video.info = options.saveTo;
+      }
+      return video;
     },
 
     async playlist(listId, signal) {
@@ -343,7 +410,7 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
       };
       const result = await exec(
         // no fixups: they would rewrite the file while ffmpeg reads it
-        ["--no-playlist", "-f", part.format, "--fixup", "never", ...downloadArgs, "-o", outputName(path.basename(file)), "--", video.url],
+        ["--no-playlist", "-f", part.format, "--fixup", "never", ...downloadArgs, "-o", outputName(path.basename(file)), ...videoArgs(video, path.dirname(file))],
         { signal, timeoutMs: 3 * 3600_000, onLine, cwd: path.dirname(file) },
       );
       if (result.code !== 0) fail(result.stderr);
@@ -368,7 +435,7 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
           "-o", "%(id)s.%(ext)s",
           ...(ytDlp.ffmpeg ? ["--ffmpeg-location", ytDlp.ffmpeg] : []),
           "--print", "after_move:filepath",
-          "--", video.url,
+          ...videoArgs(video, dir),
         ],
         { signal, timeoutMs: 3 * 3600_000, onLine, cwd: dir },
       );

@@ -22,9 +22,9 @@ Commands: `/watch`, `/watch-skip`, `/watch-stop`, `/watch-lock`, `/watch-update`
 
 ## Settings
 
-Video quality (480p to 1080p, 30 or 60 fps), longest video, videos at once across the server, and weekly yt-dlp updates. Each playing video keeps about one CPU core busy.
+Video quality (480p to 1080p, 30 or 60 fps), longest video, videos at once across the server, and weekly yt-dlp updates. A 720p60 video keeps about half a CPU core busy, 1080p60 about one.
 
-If YouTube asks the server to sign in, put a `cookies.txt` into `plugin-data/jollyvideo/bin` in Sharkord's folder.
+If YouTube asks the server to sign in, put a `cookies.txt` into `plugin-data/jollyvideo/bin` in Sharkord's folder. Take it from a spare Google account: everyone's searches and videos go through it, private ones included.
 
 ## Development
 

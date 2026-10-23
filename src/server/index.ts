@@ -8,7 +8,7 @@ import { startEncoder } from "./encoder";
 import { encodeForPanel, errorText, UserError, userMessage } from "./errors";
 import { createOutput } from "./output";
 import { ChannelPlayer, currentRevision, type TDisk } from "./player";
-import { closeWhenEmpty, Players } from "./players";
+import { closeWhenEmpty, fitted, Players } from "./players";
 import { readSettings, SETTINGS } from "./settings";
 import { Thumbnails } from "./thumbnails";
 import { Toolbox } from "./tools";
@@ -22,6 +22,8 @@ const ADMIN = "MANAGE_PLUGINS" as Permission;
 const DAY_MS = 86_400_000;
 /** a channel left empty this long stops playing, so it gives its slot back */
 const EMPTY_CHANNEL_MS = 60_000;
+/** after a failed install, adding a video does not try again for this long */
+const INSTALL_RETRY_MS = 5 * 60_000;
 
 let unload: (() => Promise<void>) | null = null;
 
@@ -64,11 +66,14 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
   const cacheDir = path.join(ctx.dataPath, "cache");
   // downloads only live as long as their video; anything here is left over
   await rm(cacheDir, { recursive: true, force: true });
-  await mkdir(cacheDir, { recursive: true });
+  const scratch = path.join(cacheDir, "tmp");
+  await mkdir(scratch, { recursive: true });
   await rm(path.join(toolbox.binDir, "download-info.json"), { force: true });
 
+  let installFailedAt = 0;
   const install = (refreshYtDlp = false) =>
     toolbox.ensure({ refreshYtDlp }).catch((error) => {
+      installFailedAt = Date.now();
       log.error("[tools]", errorText(error));
       throw error;
     });
@@ -87,15 +92,17 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
 
   const ready = async () => {
     if (toolbox.ytDlp() && toolbox.ffmpeg()) return;
+    // a failed install downloads a lot; it is not tried again on every add
+    if (!toolbox.installing && Date.now() - installFailedAt < INSTALL_RETRY_MS) throw new UserError("error.tools");
     try {
-      await toolbox.ensure();
+      await install();
     } catch {
       throw new UserError("error.tools");
     }
   };
 
   const youtube = createYouTube(
-    () => ({ path: toolbox.ytDlp() ?? "yt-dlp", ffmpeg: toolbox.ffmpeg(), cookies: toolbox.cookies(), scratch: cacheDir, jsRuntime }),
+    () => ({ path: toolbox.ytDlp() ?? "yt-dlp", ffmpeg: toolbox.ffmpeg(), cookies: toolbox.cookies(), scratch, jsRuntime }),
     log,
   );
   const thumbnails = new Thumbnails(`/plugins/${ctx.pluginId}`, log);
@@ -124,7 +131,8 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
         disk,
         createOutput: (id) => createOutput(ctx.voice, id, `${ctx.pluginId}:${id}`),
         encode: startEncoder,
-        thumbnail: (videoId) => thumbnails.url(videoId),
+        thumbnail: (videoId) => thumbnails.url(channelId, videoId),
+        channelPrivate: async () => (await ctx.channels.get(channelId))?.private ?? true,
         slotFree: () => players.busyCount() < settings().maxStreams,
         slotFreed: () => players.slotFreed(),
         changed: (player) => players.changed(player),
@@ -133,7 +141,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
       }),
     (player) => {
       try {
-        ctx.push.toVoiceChannel(player.channelId, player.snapshot());
+        ctx.push.toVoiceChannel(player.channelId, fitted(player.snapshot()));
       } catch (error) {
         log.error("[push]", errorText(error));
       }
@@ -161,9 +169,18 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
 
   const canModerate = (userId: number) => ctx.permissions.userCan(userId, MODERATOR);
 
+  /** the caller's voice channel, if they are really in it: Sharkord keeps it set after a moderator disconnects them */
   const voiceChannel = (invoker: TInvokerContext): number => {
-    if (!invoker.currentVoiceChannelId) throw new UserError("error.joinVoice");
-    return invoker.currentVoiceChannelId;
+    const channelId = invoker.currentVoiceChannelId;
+    if (!channelId) throw new UserError("error.joinVoice");
+    let present = false;
+    try {
+      present = ctx.voice.getState(channelId).users.some((user) => user.userId === invoker.userId);
+    } catch {
+      // no voice runtime: the channel is gone
+    }
+    if (!present) throw new UserError("error.joinVoice");
+    return channelId;
   };
 
   /** the player of the caller's voice channel, if the lock lets them control it */
@@ -242,9 +259,14 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     name: "state",
     requires: IN_VOICE,
     executes: guarded("state", async (invoker) => {
-      if (!invoker.currentVoiceChannelId) return null;
-      const player = players.get(invoker.currentVoiceChannelId);
-      return player ? viewer(invoker, player) : { player: idle(invoker.currentVoiceChannelId), canModerate: await canModerate(invoker.userId) };
+      let channelId: number;
+      try {
+        channelId = voiceChannel(invoker);
+      } catch {
+        return null;
+      }
+      const player = players.get(channelId);
+      return player ? viewer(invoker, player) : { player: idle(channelId), canModerate: await canModerate(invoker.userId) };
     }),
   });
 
@@ -307,7 +329,9 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     description: "Update yt-dlp now",
     requires: ADMIN,
     ephemeral: true,
-    executes: guarded("watch-update", async () => {
+    executes: guarded("watch-update", async (invoker) => {
+      // also when an admin opened the command to more people
+      if (!(await ctx.permissions.userCan(invoker.userId, ADMIN))) throw new UserError("error.adminsOnly");
       // commands time out after 30 seconds; a slow download carries on regardless
       const update = install(true).then(
         () => "yt-dlp is up to date",

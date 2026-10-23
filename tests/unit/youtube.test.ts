@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import os from "os";
+import path from "path";
 import { UserError } from "../../src/server/errors";
 import { QUALITIES } from "../../src/server/settings";
-import { commonArgs, describeFailure, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg } from "../../src/server/youtube";
+import { commonArgs, createYouTube, describeFailure, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
+
+import { script } from "../helpers/fake-host";
 
 const q720p60 = QUALITIES["720p60"]!;
 const q720p30 = QUALITIES["720p30"]!;
@@ -50,6 +55,7 @@ describe("parseQuery", () => {
 
   it("searches for anything that is not a link", () => {
     expect(parseQuery("lofi  hip hop\nradio")).toEqual({ kind: "search", text: "lofi hip hop radio" });
+    expect(parseQuery("\u0001lofi\u0000\u009bradio\u007f")).toEqual({ kind: "search", text: "lofi radio" });
     expect(sourceArg(parseQuery("--exec rm"))).toBe("ytsearch1:--exec rm");
   });
 
@@ -73,6 +79,25 @@ describe("parseQuery", () => {
   it("ignores config files and passes the JavaScript runtime", () => {
     const args = commonArgs({ path: "/y", cookies: "/c.txt", scratch: "/tmp", jsRuntime: { args: ["--js-runtimes", "bun:/bun"], env: {} } });
     expect(args).toEqual(["--ignore-config", "--no-warnings", "--js-runtimes", "bun:/bun"]);
+  });
+
+  it("shows yt-dlp only what it needs of the environment, and its own temp folder", () => {
+    const env = ytDlpEnv(
+      { path: "/y", scratch: "/data/cache/tmp", jsRuntime: { args: [], env: { BUN_BE_BUN: "1" } } },
+      "/data/cache/tmp/run",
+      { PATH: "/usr/bin", HOME: "/home/bun", HTTPS_PROXY: "http://proxy", no_proxy: "local", LANG: "C.UTF-8", SHARKORD_OIDC_CLIENT_SECRET: "s3cret", DATABASE_URL: "x", TMPDIR: "/tmp" },
+    );
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/bun",
+      HTTPS_PROXY: "http://proxy",
+      no_proxy: "local",
+      LANG: "C.UTF-8",
+      TMPDIR: "/data/cache/tmp/run",
+      TEMP: "/data/cache/tmp/run",
+      TMP: "/data/cache/tmp/run",
+      BUN_BE_BUN: "1",
+    });
   });
 });
 
@@ -110,12 +135,26 @@ describe("pickFormat", () => {
 
   it("goes as tall as allowed at the allowed frame rate, preferring H.264, SDR and the original full-range Opus track", () => {
     expect(pickFormat(formats, q720p60)).toEqual({
-      parts: { video: { formatId: "298", format: "298/bv[height<=720]", ext: "mp4", size: null }, audio: { formatId: "251", format: "251/ba", ext: "webm", size: 1000 } },
+      parts: {
+        video: { formatId: "298", format: "298/bv[height<=720]", codec: expect.stringMatching(/^avc1/), copy: false, ext: "mp4", size: null },
+        audio: { formatId: "251", format: "251/ba[acodec=opus][audio_channels<=?2]", codec: "opus", copy: true, ext: "webm", size: 1000 },
+      },
       format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
       fps: 60,
     });
     expect(ids(pickFormat(formats, q720p30))).toBe("136+251");
     expect(ids(pickFormat(formats, q480))).toBe("135+251");
+  });
+
+  it("prefers stereo sound, and passes only stereo Opus through", () => {
+    const stereo = audio("251", "opus", 130, { audio_channels: 2 });
+    const surround = audio("338", "opus", 480, { audio_channels: 6 });
+    const picked = pickFormat([video("136", 720, "avc1"), surround, stereo], q720p30).parts!.audio;
+    expect(picked).toMatchObject({ formatId: "251", copy: true });
+    const onlySurround = pickFormat([video("136", 720, "avc1"), surround], q720p30).parts!.audio;
+    expect(onlySurround).toMatchObject({ formatId: "338", format: "338/ba", copy: false });
+    const aac = pickFormat([video("136", 720, "avc1"), audio("140", "mp4a.40.2", 128)], q720p30).parts!.audio;
+    expect(aac.copy).toBe(false);
   });
 
   it("takes the shortest video when nothing is short enough", () => {
@@ -154,7 +193,7 @@ describe("pickLive", () => {
 });
 
 describe("parseInfo", () => {
-  const info = (extra: object) => JSON.stringify({ id: "dQw4w9WgXcQ", title: " Title ", duration: 212.4, formats: [video("136", 720, "avc1"), audio("251", "opus", 1)], ...extra });
+  const info = (extra: object) => JSON.stringify({ id: "dQw4w9WgXcQ", title: " Title\u0007 ", duration: 212.4, formats: [video("136", 720, "avc1"), audio("251", "opus", 1)], ...extra });
 
   it("reads a video", () => {
     const parsed = parseInfo(`${info({})}\n`, { kind: "video", videoId: "dQw4w9WgXcQ", start: 30 }, q720p30);
@@ -206,5 +245,30 @@ describe("describeFailure", () => {
     expect(describeFailure("ERROR: [youtube] abc: Video unavailable")).toBe("yt.unavailable");
     expect(describeFailure("ERROR: unable to write data: [Errno 28] No space left on device")).toBe("error.disk");
     expect(describeFailure("ERROR: something new")).toBe("yt.failed");
+  });
+});
+
+describe("yt-dlp runs", () => {
+  it("each get a temp folder of their own, as their working folder, with a copy of the cookies, removed afterwards", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "jv-runs-"));
+    const scratch = path.join(dir, "scratch");
+    mkdirSync(scratch);
+    writeFileSync(path.join(dir, "cookies.txt"), "# cookies");
+    // notes where it ran, what it was given, and leaves something behind like a stopped PyInstaller program
+    const ytDlp = script(
+      dir,
+      "yt-dlp",
+      `pwd > "${dir}/pwd.txt"; echo "$TMPDIR" > "${dir}/tmp.txt"; for a in "$@"; do [ "$prev" = "--cookies" ] && cat "$a" > "${dir}/cookies-seen.txt"; prev="$a"; done
+mkdir -p "$TMPDIR/_MEI123"; echo x > "$TMPDIR/_MEI123/lib"
+echo '{"id":"dQw4w9WgXcQ","title":"t","duration":1,"formats":[]}'`,
+    );
+    const youtube = createYouTube(() => ({ path: ytDlp, cookies: path.join(dir, "cookies.txt"), scratch, jsRuntime: { args: [], env: {} } }), { error() {} });
+    await youtube.resolve(parseQuery("anything"), q720p30, new AbortController().signal);
+    const ran = readFileSync(path.join(dir, "pwd.txt"), "utf-8").trim();
+    expect(path.dirname(ran)).toBe(scratch);
+    expect(readFileSync(path.join(dir, "tmp.txt"), "utf-8").trim()).toBe(ran);
+    expect(readFileSync(path.join(dir, "cookies-seen.txt"), "utf-8")).toBe("# cookies");
+    expect(readdirSync(scratch)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

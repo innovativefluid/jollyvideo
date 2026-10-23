@@ -5,6 +5,8 @@ export type TRunResult = { code: number; stdout: string; stderr: string };
 export type TRunOptions = {
   env?: Record<string, string | undefined>;
   cwd?: string;
+  /** after a polite stop, how long a stopped program gets before it is killed */
+  graceMs?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** called for every stdout line; stdout is then not collected */
@@ -55,27 +57,33 @@ export const tail = async (stream: ReadableStream<Uint8Array>, size = STDERR_TAI
   return (text + decoder.decode()).slice(-size);
 };
 
+const signalGroup = (pid: number, signal: NodeJS.Signals) => {
+  try {
+    // spawned detached, so the child leads its own process group
+    process.kill(-pid, signal);
+  } catch {
+    // already gone
+  }
+};
+
 /**
- * Kills a process and everything it started. yt-dlp's release builds are
+ * Stops a process and everything it started. yt-dlp's release builds are
  * PyInstaller programs, a launcher that runs the real yt-dlp as a child: a
- * kill that reaches only the launcher leaves the download going.
+ * stop that reaches only the launcher leaves the download going. They are
+ * asked first, since a killed launcher leaves its unpacked copy (80 MB) in the
+ * temp folder; whatever is still there after `graceMs` is killed.
  */
-export const killTree = (child: { pid: number; kill(signal?: number | NodeJS.Signals): void }): void => {
-  try {
-    if (process.platform === "win32") {
+export const killTree = (child: { pid: number; kill(signal?: number | NodeJS.Signals): void }, graceMs = 2_000): void => {
+  if (process.platform === "win32") {
+    try {
       Bun.spawn(["taskkill", "/pid", String(child.pid), "/T", "/F"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    } else {
-      // spawned detached, so the child leads its own process group
-      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // already gone
     }
-  } catch {
-    // already gone
+    return;
   }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // already gone
-  }
+  signalGroup(child.pid, "SIGTERM");
+  setTimeout(() => signalGroup(child.pid, "SIGKILL"), graceMs).unref?.();
 };
 
 /** runs a program to its end; never throws for a non-zero exit, only for one that cannot start or is aborted */
@@ -89,7 +97,7 @@ export const run = async (cmd: string[], options: TRunOptions = {}): Promise<TRu
     stderr: "pipe",
     detached: process.platform !== "win32",
   });
-  const kill = () => killTree(child);
+  const kill = () => killTree(child, options.graceMs);
   options.signal?.addEventListener("abort", kill, { once: true });
   const timer = options.timeoutMs ? setTimeout(kill, options.timeoutMs) : undefined;
   try {
@@ -104,33 +112,39 @@ export const run = async (cmd: string[], options: TRunOptions = {}): Promise<TRu
 };
 
 /**
- * At most `size` tasks at a time; the rest wait their turn. A task whose
- * signal aborts while it waits never starts.
+ * At most `size` tasks at a time; the rest wait their turn, urgent ones
+ * first. `urgent` can be a function, asked when a place frees up, so a task
+ * that became urgent while it waited goes ahead. A task whose signal aborts
+ * while it waits never starts.
  */
 export const limiter = (size: number) => {
   let active = 0;
-  const waiting: (() => void)[] = [];
+  const waiting: { go(): void; urgent(): boolean }[] = [];
   // a finished task hands its place straight to the next one
   const release = () => {
-    const next = waiting.shift();
-    if (next) next();
+    const urgent = waiting.findIndex((entry) => entry.urgent());
+    const [next] = waiting.splice(urgent === -1 ? 0 : urgent, 1);
+    if (next) next.go();
     else active--;
   };
-  return async <T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+  return async <T>(task: () => Promise<T>, signal?: AbortSignal, urgent: boolean | (() => boolean) = false): Promise<T> => {
     signal?.throwIfAborted();
     if (active < size) {
       active++;
     } else {
       await new Promise<void>((resolve, reject) => {
-        const go = () => {
-          signal?.removeEventListener("abort", cancel);
-          resolve();
+        const entry = {
+          go: () => {
+            signal?.removeEventListener("abort", cancel);
+            resolve();
+          },
+          urgent: typeof urgent === "function" ? urgent : () => urgent,
         };
         const cancel = () => {
-          waiting.splice(waiting.indexOf(go), 1);
+          waiting.splice(waiting.indexOf(entry), 1);
           reject(signal?.reason ?? new Error("aborted"));
         };
-        waiting.push(go);
+        waiting.push(entry);
         signal?.addEventListener("abort", cancel, { once: true });
       });
     }

@@ -31,16 +31,15 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   duration: 634,
   live: false,
   thumbnail: thumbnail(200),
-  addedBy: 1,
   state: "playing",
   position: 127,
   progress: null,
   ...extra,
 });
 const queue: TQueueEntry[] = [
-  { id: "q1", title: "Sintel - Open Movie by Blender Foundation", duration: 888, live: false, thumbnail: thumbnail(20), addedBy: 2, state: "ready", progress: 0.35 },
-  { id: "q2", title: "lofi hip hop radio - beats to relax/study to", duration: 0, live: true, thumbnail: thumbnail(280), addedBy: 3, state: "ready", progress: null },
-  { id: "q3", title: "tears of steel", duration: 0, live: false, thumbnail: "", addedBy: 1, state: "resolving", progress: null },
+  { id: "q1", title: "Sintel - Open Movie by Blender Foundation", duration: 888, live: false, state: "ready", progress: 0.35 },
+  { id: "q2", title: "lofi hip hop radio - beats to relax/study to", duration: 0, live: true, state: "ready", progress: null },
+  { id: "q3", title: "tears of steel", duration: 0, live: false, state: "resolving", progress: null },
 ];
 
 const scenarios: Record<string, TViewer> = {
@@ -76,7 +75,7 @@ const control = (op: TControl) => {
   if (op.op === "stop") Object.assign(player, { now: null, queue: [] });
   if (op.op === "skip") {
     const [next, ...rest] = player.queue;
-    player.now = next ? { ...next, state: "playing", position: 0 } : null;
+    player.now = next ? { ...next, thumbnail: "", state: "playing", position: 0 } : null;
     player.queue = rest;
   }
   update(player);
@@ -90,7 +89,7 @@ globals.__SHARKORD_STORE__ = {
       await new Promise((resolve) => setTimeout(resolve, 150));
       if (name === "add") {
         const query = (payload as { query: string }).query;
-        const entry: TQueueEntry = { id: crypto.randomUUID(), title: query, duration: 0, live: false, thumbnail: "", addedBy: 1, state: "resolving", progress: null };
+        const entry: TQueueEntry = { id: crypto.randomUUID(), title: query, duration: 0, live: false, state: "resolving", progress: null };
         update({ ...viewer.player, queue: [...viewer.player.queue, entry] });
       }
       if (name === "control") control(payload as TControl);

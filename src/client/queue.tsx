@@ -6,7 +6,7 @@
  * page: a row moved in the page would lose the pointer, and keyboard focus.
  */
 import { GripVertical, ListX, LoaderCircle, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import type { TControl, TQueueEntry } from "../contract";
 import { cls } from "./classes";
 import { formatTime } from "./format";
@@ -51,10 +51,15 @@ const titleOf = (entry: TQueueEntry) => (entry.playlist ? t("ui.playlist") : ent
 const meta = (entry: TQueueEntry): ReactNode => {
   if (entry.state === "resolving") return <LoaderCircle className={cls.spinner} role="img" aria-label={t("ui.loading")} />;
   if (entry.progress !== null) return `${Math.round(entry.progress * 100)}%`;
-  return entry.live ? t("ui.live") : formatTime(entry.duration);
+  if (entry.live) return t("ui.live");
+  // a video further back is looked up when it comes closer
+  return entry.duration > 0 ? formatTime(entry.duration) : null;
 };
 
-export const Queue = (props: { queue: TQueueEntry[]; canControl: boolean; send(op: TControl): void }) => {
+type TQueueProps = { queue: TQueueEntry[]; canControl: boolean; send(op: TControl): void };
+
+/** rendered again only when the queue changes, not with every tick of the position */
+export const Queue = memo(function Queue(props: TQueueProps) {
   const { queue, canControl, send } = props;
   const list = useRef<HTMLUListElement>(null);
   const [drag, setDrag] = useState<TDrag | null>(null);
@@ -183,4 +188,4 @@ export const Queue = (props: { queue: TQueueEntry[]; canControl: boolean; send(o
       )}
     </>
   );
-};
+});

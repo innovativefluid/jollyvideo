@@ -29,7 +29,10 @@ const deferred = <T>() => {
   return { promise, resolve, reject };
 };
 
-const PARTS = { video: { formatId: "v", format: "v/bv", ext: "mp4", size: 100 }, audio: { formatId: "a", format: "a/ba", ext: "webm", size: 10 } };
+const PARTS = {
+  video: { formatId: "v", format: "v/bv", codec: "avc1", copy: false, ext: "mp4", size: 100 },
+  audio: { formatId: "a", format: "a/ba", codec: "opus", copy: true, ext: "webm", size: 10 },
+};
 
 const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResolved => ({
   videoId: id.padEnd(11, "x"),
@@ -63,12 +66,16 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const setup = (videos: Record<string, TResolved | Error>, options: { settings?: Partial<TSettings>; playlists?: Record<string, TPlaylistEntry[]> } = {}) => {
+type TSetup = { settings?: Partial<TSettings>; playlists?: Record<string, TPlaylistEntry[]>; prefetchDelayMs?: number; private?: boolean };
+
+const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) => {
   const cacheDir = mkdtempSync(path.join(os.tmpdir(), "jv-player-"));
   cleanup.push(cacheDir);
   const encoders: TFakeEncoder[] = [];
   const downloads: TFakeDownload[] = [];
   const resolves: string[] = [];
+  const urgent: string[] = [];
+  const urgency = new Map<string, () => boolean>();
   const published: TLabel[] = [];
   const connections: (TConnection & { closed: boolean })[] = [];
   const playlistLookups: { listId: string; signal: AbortSignal; done: ReturnType<typeof deferred<TPlaylistEntry[]>> }[] = [];
@@ -94,9 +101,12 @@ const setup = (videos: Record<string, TResolved | Error>, options: { settings?: 
     cacheDir,
     disk: { free: async () => free, reserved: 0 },
     youtube: {
-      async resolve(source) {
+      async resolve(source, _quality, _signal, lookup) {
         const key = keyOf(source);
         resolves.push(key);
+        const isUrgent = typeof lookup?.urgent === "function" ? lookup.urgent : () => !!lookup?.urgent;
+        if (isUrgent()) urgent.push(key);
+        urgency.set(key, isUrgent);
         const found = videos[key];
         if (!found) throw new UserError("yt.nothingFound");
         if (found instanceof Error) throw found;
@@ -155,6 +165,8 @@ const setup = (videos: Record<string, TResolved | Error>, options: { settings?: 
       };
     },
     thumbnail: (videoId) => `/thumb/${videoId}.jpg`,
+    channelPrivate: async () => options.private ?? false,
+    prefetchDelayMs: options.prefetchDelayMs ?? 0,
     slotFree: () => slots,
     slotFreed: () => freed++,
     changed: () => {},
@@ -169,12 +181,15 @@ const setup = (videos: Record<string, TResolved | Error>, options: { settings?: 
     encoders,
     downloads,
     resolves,
+    urgent,
+    urgency,
     published,
     connections,
     errors,
     cacheDir,
     playlistLookups,
     of,
+    deps,
     removed: () => removed,
     freed: () => freed,
     setSlots: (value: boolean) => (slots = value),
@@ -260,6 +275,7 @@ describe("ChannelPlayer", () => {
     await t.downloaded("a");
     const options = t.encoders[0]!.options;
     expect(options.follow).toBe(false);
+    expect(options.copyAudio).toBe(false);
     expect(path.relative(path.join(t.cacheDir, t.player.snapshot().now!.id), options.input as string)).toMatch(/^\d+\/merged\.mkv$/);
   });
 
@@ -270,7 +286,7 @@ describe("ChannelPlayer", () => {
     t.encoders[0]!.start();
     t.player.add("b", 2);
     await t.grow("b", 0.5);
-    expect(t.player.snapshot().queue).toMatchObject([{ title: "Video b", state: "ready", progress: 0.5, addedBy: 2 }]);
+    expect(t.player.snapshot().queue).toEqual([{ id: expect.any(String), title: "Video b", duration: 200, live: false, state: "ready", progress: 0.5 }]);
     t.encoders[0]!.exit(0);
     await flush();
     expect(t.encoders).toHaveLength(2);
@@ -370,6 +386,8 @@ describe("ChannelPlayer", () => {
     t.player.add("a", 1);
     await t.grow("a", 0.5);
     expect(t.encoders[0]!.options.follow).toBe(true);
+    // the Opus part goes through as it is
+    expect(t.encoders[0]!.options.copyAudio).toBe(true);
     expect(t.encoders[0]!.events.growing?.()).toBe(true);
     await t.downloaded("a");
     expect(t.encoders[0]!.events.growing?.()).toBe(false);
@@ -486,6 +504,7 @@ describe("ChannelPlayer", () => {
     t.player.add("a", 1);
     t.player.add("b", 1);
     t.player.add("c", 1);
+    await t.downloaded("a");
     await t.grow("b", 0.1);
     expect(t.of("c")).toHaveLength(0);
     t.player.remove(t.player.snapshot().queue[0]!.id);
@@ -499,7 +518,7 @@ describe("ChannelPlayer", () => {
   it("moves queued videos, and downloads whichever is next", async () => {
     const t = setup({ a: vod("a"), b: vod("b"), c: vod("c"), d: vod("d") });
     for (const id of ["a", "b", "c", "d"]) t.player.add(id, 1);
-    await flush();
+    await t.downloaded("a");
     const ids = () => t.player.snapshot().queue.map((entry) => entry.title.at(-1));
     const id = (title: string) => t.player.snapshot().queue.find((entry) => entry.title === `Video ${title}`)!.id;
     t.player.move(id("d"), 0);
@@ -514,36 +533,132 @@ describe("ChannelPlayer", () => {
     expect(ids()).toEqual(["c", "b", "d"]);
   });
 
-  it("downloads only the next video: one moved away from next stops quietly", async () => {
-    const t = setup({ a: vod("a"), b: vod("b"), c: vod("c"), d: vod("d") });
+  it("downloads the next video only once the one playing is in and it has been next a while", async () => {
+    const t = setup({ a: vod("a"), b: vod("b"), c: vod("c"), d: vod("d") }, { prefetchDelayMs: 40 });
     for (const id of ["a", "b", "c", "d"]) t.player.add(id, 1);
-    await t.grow("b", 0.1);
+    await t.grow("a", 0.5);
+    await Bun.sleep(60);
+    expect(t.of("b")).toHaveLength(0);
+    await t.downloaded("a");
+    expect(t.of("b")).toHaveLength(0);
+    await Bun.sleep(60);
+    expect(t.of("b")).toHaveLength(2);
+
     const id = (title: string) => t.player.snapshot().queue.find((entry) => entry.title === `Video ${title}`)!.id;
-    for (const title of ["c", "d", "c", "b"]) {
+    // quick reordering starts nothing; b keeps going while it is one of the next two
+    for (const title of ["c", "d", "c", "d", "c"]) {
       t.player.move(id(title), 0);
-      await flush();
+      await Bun.sleep(5);
     }
-    const running = t.downloads.filter((d) => !d.signal.aborted).map((d) => d.video.title.at(-1));
-    expect(running.sort()).toEqual(["a", "a", "b", "b"]);
-    expect(t.player.snapshot()).toMatchObject({ error: null, queue: [{ title: "Video b", progress: 0 }, { title: "Video c" }, { title: "Video d" }] });
+    expect(t.player.snapshot().queue.map((entry) => entry.title.at(-1))).toEqual(["c", "d", "b"]);
+    expect(t.of("c")).toHaveLength(0);
+    // b is third now: its download stops, without an error
+    expect(t.of("b").every((d) => d.signal.aborted)).toBe(true);
+    await Bun.sleep(60);
+    expect(t.of("c")).toHaveLength(2);
+    expect(t.of("d")).toHaveLength(0);
+    expect(t.player.snapshot()).toMatchObject({ error: null, queue: [{ title: "Video c", progress: 0 }, { title: "Video d" }, { title: "Video b" }] });
   });
 
-  it("keeps room on the disk for downloads still running", async () => {
+  it("keeps room on the disk for downloads still running, across channels", async () => {
     const t = setup({ a: vod("a"), b: vod("b") });
+    const other = new ChannelPlayer(8, t.deps);
     // room for one 110 byte video next to the reserve, not two
     t.setFree(512 * 1024 * 1024 + 150);
     t.player.add("a", 1);
+    await waitFor(() => t.of("a").length === 2);
+    other.add("b", 1);
+    await waitFor(() => other.snapshot().error !== null);
+    expect(t.of("b")).toHaveLength(0);
+    expect(other.snapshot()).toMatchObject({ now: null, error: { key: "error.disk" } });
+    // the space comes back once the download is done
+    await t.downloaded("a");
+    other.add("b", 1);
+    await waitFor(() => t.of("b").length === 2);
+  });
+
+  it("looks up only the first few queued videos ahead, the one playing first", async () => {
+    const videos = Object.fromEntries(["a", "b", "c", "d", "e"].map((id) => [id, vod(id)]));
+    const t = setup(videos);
+    for (const id of ["a", "b", "c", "d", "e"]) t.player.add(id, 1);
+    await flush();
+    expect(t.resolves.toSorted()).toEqual(["a", "b", "c", "d"]);
+    expect(t.urgent).toEqual(["a"]);
+    // not looked up yet: shown as typed, without a spinner
+    expect(t.player.snapshot().queue[3]).toMatchObject({ title: "e", state: "ready", duration: 0 });
+    t.player.remove(t.player.snapshot().queue[0]!.id);
+    await flush();
+    expect(t.resolves.toSorted()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("hurries a lookup asked for ahead once its video is about to play", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
+    t.player.add("a", 1);
     t.player.add("b", 1);
     await flush();
-    expect(t.of("a")).toHaveLength(2);
-    expect(t.of("b")).toHaveLength(0);
-    expect(t.player.snapshot()).toMatchObject({ now: { title: "Video a" }, queue: [], error: { key: "error.disk" } });
+    expect(t.urgency.get("b")!()).toBe(false);
+    t.player.skip();
+    await flush();
+    // a lookup still waiting for its turn would now go first
+    expect(t.urgency.get("b")!()).toBe(true);
+  });
+
+  it("reads at most two playlists at once per channel, and hurries the lookup of the first video", async () => {
+    const t = setup({ aaaaaaaaaaa: vod("aaaaaaaaaaa") });
+    t.player.add("https://www.youtube.com/playlist?list=PL0123456789", 1);
+    t.player.add("https://www.youtube.com/playlist?list=PL0123456780", 1);
+    expect(() => t.player.add("https://www.youtube.com/playlist?list=PL0123456781", 1)).toThrow(UserError);
+    await waitFor(() => t.playlistLookups.length === 2);
+    t.playlistLookups[0]!.done.resolve([{ videoId: "aaaaaaaaaaa", title: "First", duration: 100 }]);
+    await flush();
+    expect(t.urgent).toEqual(["aaaaaaaaaaa"]);
+  });
+
+  it("looks a video up again before downloading it when its lookup is old", async () => {
+    const t = setup({ a: vod("a"), b: vod("b") });
+    t.player.add("a", 1);
+    t.player.add("b", 1);
+    await flush();
+    expect(t.resolves.toSorted()).toEqual(["a", "b"]);
+    t.tick(2 * 3600_000);
+    await t.downloaded("a");
+    await flush();
+    expect(t.resolves.toSorted()).toEqual(["a", "b", "b"]);
+    expect(t.urgent).toEqual(["a", "b"]);
+    expect(t.of("b")).toHaveLength(2);
+  });
+
+  it("refuses a video of unknown length while there is a length limit", async () => {
+    const t = setup({ a: vod("a", 0) }, { settings: { maxSeconds: 3600 } });
+    t.player.add("a", 1);
+    await flush();
+    expect(t.downloads).toHaveLength(0);
+    expect(t.player.snapshot().error).toEqual({ key: "error.unknownLength" });
+  });
+
+  it("names the video on the stream only in a channel everyone can see", async () => {
+    for (const hidden of [false, true]) {
+      const t = setup({ a: vod("a") }, { private: hidden });
+      t.player.add("a", 1);
+      await t.downloaded("a");
+      t.encoders[0]!.start();
+      expect(t.published).toEqual([hidden ? { title: "Jollyvideo", bannerUrl: "" } : { title: "Video a", bannerUrl: "/thumb/axxxxxxxxxx.jpg" }]);
+    }
+  });
+
+  it("keeps the state it pushes small", () => {
+    const t = setup({});
+    t.player.add("first", 1);
+    t.player.add("x".repeat(400), 1);
+    const [entry] = t.player.snapshot().queue;
+    expect(entry!.title).toHaveLength(100);
+    expect(Object.keys(entry!).sort()).toEqual(["duration", "id", "live", "progress", "state", "title"]);
   });
 
   it("queues a playlist's videos once it is looked up, leaving out the too long ones", async () => {
     const t = setup({ aaaaaaaaaaa: vod("aaaaaaaaaaa", 100, { title: "First" }), ccccccccccc: vod("ccccccccccc", 100, { title: "Third" }) }, { settings: { maxSeconds: 600 } });
     t.player.add("https://www.youtube.com/playlist?list=PL0123456789", 3);
-    expect(t.player.snapshot().queue).toMatchObject([{ playlist: true, state: "resolving", addedBy: 3 }]);
+    expect(t.player.snapshot().queue).toMatchObject([{ playlist: true, state: "resolving" }]);
     await waitFor(() => t.playlistLookups.length === 1);
     t.playlistLookups[0]!.done.resolve([
       { videoId: "aaaaaaaaaaa", title: "First", duration: 100 },
@@ -552,12 +667,12 @@ describe("ChannelPlayer", () => {
     ]);
     await flush();
     const snapshot = t.player.snapshot();
-    // the first one is up, and the next one downloads; neither was looked up before its turn
+    // the first one is up, and the next one is looked up ahead
     expect(snapshot.now?.title).toBe("First");
     expect(snapshot.queue).toMatchObject([{ title: "Third", state: "ready" }]);
     expect(snapshot.queue[0]!.playlist).toBeUndefined();
     expect(snapshot.error).toEqual({ key: "error.someTooLong", params: { minutes: 10 } });
-    expect(t.resolves).toEqual(["aaaaaaaaaaa", "ccccccccccc"]);
+    expect(t.resolves.toSorted()).toEqual(["aaaaaaaaaaa", "ccccccccccc"]);
   });
 
   it("says when a playlist did not fit into the queue", async () => {

@@ -15,12 +15,12 @@ const GAP = 8;
 
 const useView = () => useSyncExternalStore(subscribe, getView);
 
-/** re-renders twice a second while `active`, so the position moves */
+/** re-renders every second while `active`, so the position moves */
 const useTicking = (active: boolean) => {
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;
-    const timer = setInterval(() => setTick((tick) => tick + 1), 500);
+    const timer = setInterval(() => setTick((tick) => tick + 1), 1000);
     return () => clearInterval(timer);
   }, [active]);
 };
@@ -160,22 +160,30 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
   const panel = useRef<HTMLDivElement>(null);
   const [where, setWhere] = useState<TPlace>(() => place(anchor.current));
 
-  // follows the button when the window or the layout around it changes
+  // follows the button when the window or the layout around it changes, at most once a frame
   useLayoutEffect(() => {
     const update = () =>
       setWhere((old) => {
         const next = place(anchor.current);
         return samePlace(old, next) ? old : next;
       });
+    let frame = 0;
+    const schedule = () => {
+      frame ||= requestAnimationFrame(() => {
+        frame = 0;
+        update();
+      });
+    };
     update();
-    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(schedule);
     observer?.observe(document.body);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, { capture: true, passive: true });
     return () => {
+      cancelAnimationFrame(frame);
       observer?.disconnect();
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, { capture: true });
     };
   }, [anchor]);
 

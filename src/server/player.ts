@@ -27,6 +27,8 @@ export type TPlayerDeps = {
   createOutput(channelId: number): TOutput;
   encode(options: TEncodeOptions, events: TEncoderEvents): TEncoder;
   thumbnail(videoId: string): string;
+  /** a private channel: Sharkord shows every stream's title to the whole server, so its videos stay unnamed there */
+  channelPrivate(): Promise<boolean>;
   /** whether one more video may start playing on the server */
   slotFree(): boolean;
   /** this player stopped holding a slot, so a waiting one may start */
@@ -34,6 +36,8 @@ export type TPlayerDeps = {
   changed(player: ChannelPlayer): void;
   log: { log(...args: unknown[]): void; error(...args: unknown[]): void };
   now(): number;
+  /** how long a video has to be next before it downloads ahead; PREFETCH_DELAY_MS by default */
+  prefetchDelayMs?: number;
 };
 
 /** one file being downloaded */
@@ -46,6 +50,10 @@ type TItem = {
   /** what a playlist said about the video, until it is looked up */
   hint: { title: string; duration: number } | null;
   video: TResolved | null;
+  /** when `video` was looked up: its download links expire */
+  lookedUpAt: number;
+  /** its lookup is wanted now, so it goes ahead of other lookups even if it was asked for earlier */
+  urgent: boolean;
   resolving: Promise<TResolved> | null;
   fetching: TFetch | null;
   /** separate video and audio, readable while they grow; or one merged file, readable when done */
@@ -91,6 +99,18 @@ const RETRY_AFTER_SECONDS = 60;
 const BUFFER_SECONDS = 20;
 /** room left on the disk after a download */
 const DISK_RESERVE = 512 * 1024 * 1024;
+/** this many videos at the front of the queue are looked up ahead; the rest when they come up */
+const LOOK_AHEAD = 3;
+/** a video downloads ahead once it has been next this long, so reordering does not start and stop downloads */
+const PREFETCH_DELAY_MS = 5_000;
+/** a download ahead keeps going while its video is one of the next this many */
+const KEEP_AHEAD = 2;
+/** older lookups are made again before downloading: YouTube's links expire after some hours */
+const LOOKUP_MAX_AGE_MS = 60 * 60_000;
+/** what a queued search shows of what was typed */
+const SHOWN_QUERY = 100;
+/** playlists being read at once per channel; each is a lookup */
+const PENDING_PLAYLISTS = 2;
 
 const minutes = (seconds: number) => Math.round(seconds / 60);
 
@@ -100,10 +120,11 @@ let fetches = 0;
 let revisions = 0;
 export const currentRevision = (): number => revisions;
 
-/** the bytes a download takes; without sizes from YouTube, a generous 8 Mbit/s */
+/** the bytes a download takes; without sizes from YouTube, a generous 8 Mbit/s, and 2 GB without a length either */
 const sizeOf = (video: TResolved) => {
   const sizes = video.parts ? [video.parts.video.size, video.parts.audio.size] : [null];
-  return sizes.every((size) => size !== null) ? sizes.reduce<number>((sum, size) => sum + size!, 0) : video.duration * 1_000_000;
+  if (sizes.every((size) => size !== null)) return sizes.reduce<number>((sum, size) => sum + size!, 0);
+  return video.duration > 0 ? video.duration * 1_000_000 : 2 * 1024 ** 3;
 };
 
 const fraction = (download: TDownload) => (download.done ? 1 : download.total ? Math.min(1, download.bytes / download.total) : 0);
@@ -118,6 +139,10 @@ export class ChannelPlayer {
   private errorTimer: ReturnType<typeof setTimeout> | undefined;
   private destroyed = false;
   private rev = ++revisions;
+  /** the video waiting out PREFETCH_DELAY_MS before it downloads ahead */
+  private prefetchFor: TItem | null = null;
+  private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+  private titleHidden = true;
 
   constructor(
     readonly channelId: number,
@@ -126,6 +151,11 @@ export class ChannelPlayer {
 
   get isLocked(): boolean {
     return this.locked;
+  }
+
+  /** a video is on air, so clients count its position up */
+  get playing(): boolean {
+    return this.current?.state === "playing";
   }
 
   /** a video is playing, paused or loading, which takes one of the server's slots */
@@ -139,16 +169,15 @@ export class ChannelPlayer {
     this.assertAlive();
     const source = parseQuery(query);
     if (this.queue.length + this.pending.length >= MAX_QUEUE) throw new UserError("error.queueFull");
+    if (source.kind === "playlist" && this.pending.length >= PENDING_PLAYLISTS) throw new UserError("error.playlistsLoading");
     if (!this.current && !this.deps.slotFree()) throw new UserError("error.slots");
     this.setError(null);
     if (source.kind === "playlist") {
       this.addPlaylist(source.listId, userId);
     } else {
-      const item = this.item(source, userId, null);
-      this.queue.push(item);
-      // looked up right away, so a wrong link says so while its sender still looks
-      this.resolve(item).catch((error) => this.dropQueued(item, error));
+      this.queue.push(this.item(source, userId, null));
       this.next();
+      this.lookAhead();
     }
     this.changed();
   }
@@ -160,7 +189,7 @@ export class ChannelPlayer {
     if (current.state !== "playing") throw new UserError("error.stillLoading");
     current.base = this.position(current);
     current.state = "paused";
-    this.stopRun(current);
+    this.background(this.stopRun(current));
     this.changed();
   }
 
@@ -182,7 +211,7 @@ export class ChannelPlayer {
     // paused: it starts there when resumed
     if (current.state !== "paused") {
       current.state = "loading";
-      this.stopRun(current);
+      this.background(this.stopRun(current));
       this.maybeStart(current);
     }
     this.changed();
@@ -214,6 +243,7 @@ export class ChannelPlayer {
     if (index !== -1) {
       const [item] = this.queue.splice(index, 1);
       this.discard(item!);
+      this.lookAhead();
       this.prefetch();
     }
     if (pending || index !== -1) this.changed();
@@ -225,6 +255,7 @@ export class ChannelPlayer {
     if (from === -1) return;
     const [item] = this.queue.splice(from, 1);
     this.queue.splice(Math.max(0, Math.min(this.queue.length, Math.floor(to))), 0, item!);
+    this.lookAhead();
     this.prefetch();
     this.changed();
   }
@@ -250,6 +281,7 @@ export class ChannelPlayer {
     if (current) this.discard(current.item, stopped);
     this.takeDown();
     clearTimeout(this.errorTimer);
+    clearTimeout(this.prefetchTimer);
     return stopped;
   }
 
@@ -257,21 +289,27 @@ export class ChannelPlayer {
     const current = this.current;
     const entry = (item: TItem) => ({
       id: item.id,
-      title: item.video?.title ?? item.hint?.title ?? (item.source.kind === "search" ? item.source.text : "YouTube video"),
+      title: item.video?.title ?? item.hint?.title ?? (item.source.kind === "search" ? item.source.text.slice(0, SHOWN_QUERY) : "YouTube video"),
       duration: item.video?.duration ?? item.hint?.duration ?? 0,
       live: item.video?.live ?? false,
-      thumbnail: item.video ? this.deps.thumbnail(item.video.videoId) : "",
-      addedBy: item.addedBy,
       progress: this.progress(item),
     });
-    const pending = this.pending.map(
-      (entry): TQueueEntry => ({ id: entry.id, title: "", duration: 0, live: false, thumbnail: "", addedBy: entry.addedBy, progress: null, state: "resolving", playlist: true }),
-    );
+    const pending = this.pending.map((entry): TQueueEntry => ({ id: entry.id, title: "", duration: 0, live: false, progress: null, state: "resolving", playlist: true }));
+    // only the one playing shows its thumbnail
+    const now = current && {
+      ...entry(current.item),
+      thumbnail: current.item.video ? this.deps.thumbnail(current.item.video.videoId) : "",
+      state: current.state,
+      position: Math.floor(this.position(current)),
+    };
     return {
       channelId: this.channelId,
       rev: this.rev,
-      now: current ? { ...entry(current.item), state: current.state, position: Math.floor(this.position(current)) } : null,
-      queue: [...this.queue.map((item): TQueueEntry => ({ ...entry(item), state: item.video || item.hint ? "ready" : "resolving" })), ...pending],
+      now,
+      queue: [
+        ...this.queue.map((item): TQueueEntry => ({ ...entry(item), state: item.resolving && !item.video && !item.hint ? "resolving" : "ready" })),
+        ...pending,
+      ],
       locked: this.locked,
       error: this.error,
     };
@@ -280,7 +318,7 @@ export class ChannelPlayer {
   // -- inside ---------------------------------------------------------------
 
   private item(source: TSource, addedBy: number, hint: TItem["hint"]): TItem {
-    return { id: crypto.randomUUID(), source, addedBy, hint, video: null, resolving: null, fetching: null, downloads: null, abort: new AbortController() };
+    return { id: crypto.randomUUID(), source, addedBy, hint, video: null, lookedUpAt: 0, urgent: false, resolving: null, fetching: null, downloads: null, abort: new AbortController() };
   }
 
   private assertAlive() {
@@ -358,6 +396,7 @@ export class ChannelPlayer {
         else if (fitting.length < entries.length) this.report(new UserError("error.someTooLong", { minutes: minutes(limit) }));
         else if (!fitting.length) this.report(new UserError("yt.playlistEmpty"));
         this.next();
+        this.lookAhead();
         this.changed();
       } catch (error) {
         if (!this.pending.includes(pending)) return;
@@ -368,20 +407,45 @@ export class ChannelPlayer {
     })());
   }
 
-  /** looks the video up once, and checks it against the length limit */
-  private resolve(item: TItem): Promise<TResolved> {
+  /**
+   * Looks the video up once, and checks it against the length limit. The
+   * lookup's info is kept on disk for the downloads. `urgent`: wanted now, so
+   * it goes ahead of other lookups.
+   */
+  private resolve(item: TItem, urgent = false): Promise<TResolved> {
+    if (urgent) item.urgent = true;
     item.resolving ??= (async () => {
       await this.deps.ready();
       const settings = this.deps.settings();
-      const video = await this.deps.youtube.resolve(item.source, settings.quality, item.abort.signal);
-      if (!video.live && settings.maxSeconds > 0 && video.duration > settings.maxSeconds) {
-        throw new UserError("error.tooLong", { minutes: minutes(settings.maxSeconds) });
+      const dir = path.join(this.deps.cacheDir, item.id);
+      await mkdir(dir, { recursive: true });
+      const video = await this.deps.youtube.resolve(item.source, settings.quality, item.abort.signal, { urgent: () => item.urgent, saveTo: path.join(dir, "info.json") });
+      if (!video.live && settings.maxSeconds > 0) {
+        // without a length, nothing says how long or how large it is
+        if (video.duration <= 0) throw new UserError("error.unknownLength");
+        if (video.duration > settings.maxSeconds) throw new UserError("error.tooLong", { minutes: minutes(settings.maxSeconds) });
       }
       item.video = video;
+      item.lookedUpAt = this.deps.now();
       this.changed();
       return video;
     })();
     return item.resolving;
+  }
+
+  /** the lookup, made again when its download links may have expired */
+  private async freshVideo(item: TItem): Promise<TResolved> {
+    const video = await this.resolve(item, true);
+    if (video.live || this.deps.now() - item.lookedUpAt < LOOKUP_MAX_AGE_MS) return video;
+    item.resolving = null;
+    return this.resolve(item, true);
+  }
+
+  /** the first few queued videos are looked up ahead, so their titles show and a bad link says so early */
+  private lookAhead() {
+    for (const item of this.queue.slice(0, LOOK_AHEAD)) {
+      if (!item.resolving) this.resolve(item).catch((error) => this.dropQueued(item, error));
+    }
   }
 
   /**
@@ -397,7 +461,7 @@ export class ChannelPlayer {
     const fetching: TFetch = { abort, dir: path.join(this.deps.cacheDir, item.id, String(++fetches)), done: Promise.resolve() };
     item.fetching = fetching;
     fetching.done = (async () => {
-      const video = await this.resolve(item);
+      const video = await this.freshVideo(item);
       if (video.live) return;
       await mkdir(fetching.dir, { recursive: true });
       const free = await this.deps.disk.free(fetching.dir);
@@ -412,13 +476,19 @@ export class ChannelPlayer {
         this.deps.disk.reserved -= needed;
       }
     })();
-    fetching.done.catch((error) => {
-      // stopped because it is no longer next
-      if (item.fetching !== fetching) return;
-      const current = this.current;
-      if (current?.item === item) this.finish(current, error);
-      else this.dropQueued(item, error);
-    });
+    fetching.done.then(
+      () => {
+        // the one playing is in: the next may download now
+        if (this.current?.item === item) this.prefetch();
+      },
+      (error) => {
+        // stopped because it is no longer next
+        if (item.fetching !== fetching) return;
+        const current = this.current;
+        if (current?.item === item) this.finish(current, error);
+        else this.dropQueued(item, error);
+      },
+    );
   }
 
   private async download(item: TItem, fetching: TFetch, video: TResolved, signal: AbortSignal) {
@@ -471,11 +541,35 @@ export class ChannelPlayer {
     }
   }
 
-  /** only the next video downloads while one plays, after the one playing; one moved away from next stops */
+  /**
+   * The next video downloads ahead once the one playing is downloaded, and
+   * once it has been next for PREFETCH_DELAY_MS. A download ahead that is
+   * running keeps going while its video is one of the next KEEP_AHEAD.
+   */
   private prefetch() {
+    this.queue.forEach((item, index) => {
+      if (index >= KEEP_AHEAD && item.fetching) this.stopFetch(item);
+    });
     const next = this.queue[0];
-    for (const item of this.queue) if (item !== next && item.fetching) this.stopFetch(item);
-    if (this.current?.item.fetching && next) this.fetch(next);
+    if (!next || next.fetching || !this.currentDownloaded()) {
+      clearTimeout(this.prefetchTimer);
+      this.prefetchFor = null;
+      return;
+    }
+    if (this.prefetchFor === next) return;
+    clearTimeout(this.prefetchTimer);
+    this.prefetchFor = next;
+    this.prefetchTimer = setTimeout(() => {
+      this.prefetchFor = null;
+      if (!this.destroyed && this.queue[0] === next && this.currentDownloaded()) this.fetch(next);
+    }, this.deps.prefetchDelayMs ?? PREFETCH_DELAY_MS);
+  }
+
+  /** the video playing needs no more downloading */
+  private currentDownloaded(): boolean {
+    const item = this.current?.item;
+    if (!item?.video) return false;
+    return item.video.live || (!!item.downloads && item.downloads.files.every((file) => file.done));
   }
 
   private stopFetch(item: TItem) {
@@ -496,6 +590,7 @@ export class ChannelPlayer {
     this.queue.splice(index, 1);
     this.discard(item);
     this.report(error);
+    this.lookAhead();
     this.prefetch();
     this.changed();
   }
@@ -525,9 +620,11 @@ export class ChannelPlayer {
     }
     const current: TCurrent = { item, state: "loading", base: 0, run: null, attempt: 0, starting: null, restarts: [], retried: false };
     this.current = current;
+    this.lookAhead();
     this.changed();
     try {
-      const video = await this.resolve(item);
+      const video = await this.resolve(item, true);
+      this.titleHidden = await this.deps.channelPrivate().catch(() => true);
       if (this.current !== current) return;
       current.base = video.start;
       this.output?.relabel(this.label(video));
@@ -540,7 +637,8 @@ export class ChannelPlayer {
   }
 
   private label(video: TResolved) {
-    return { title: video.title, bannerUrl: this.deps.thumbnail(video.videoId) };
+    // an empty banner, not none: Sharkord keeps the old one when it is left out
+    return this.titleHidden ? { title: "Jollyvideo", bannerUrl: "" } : { title: video.title, bannerUrl: this.deps.thumbnail(video.videoId) };
   }
 
   /** whether there is enough to play from `position`: the playlist of a livestream, or the download */
@@ -591,6 +689,7 @@ export class ChannelPlayer {
             input,
             live: video.live,
             follow,
+            copyAudio: !!downloads?.separate && !!video.parts?.audio.copy,
             start: position,
             // a little past the end: durations are rounded, and ffmpeg stops at the real one
             length: !video.live && video.duration > 0 ? video.duration - position + 1 : undefined,

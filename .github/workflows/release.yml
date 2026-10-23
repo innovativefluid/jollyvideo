@@ -13,66 +13,99 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
+# each job gets only what it needs
+permissions: {}
 
 jobs:
   tag:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: tag
-        env: { GH_TOKEN: '${{ github.token }}' }
+        # the version goes through the environment, never into the script's text
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
         run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "not a version: $VERSION"; exit 1
+          fi
           manifest=$(jq -r .version manifest.json)
           pkg=$(jq -r .version package.json)
-          if [ "$manifest" != "${{ inputs.version }}" ] || [ "$pkg" != "${{ inputs.version }}" ]; then
-            echo "manifest.json says $manifest and package.json $pkg, you asked for ${{ inputs.version }}"; exit 1
+          if [ "$manifest" != "$VERSION" ] || [ "$pkg" != "$VERSION" ]; then
+            echo "manifest.json says $manifest and package.json $pkg, you asked for $VERSION"; exit 1
           fi
-          tag="v${{ inputs.version }}"
+          tag="v$VERSION"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           # a tag left by a run that never got to publish (a cancelled build, say) is moved to this
-          # commit and reused; a tag with a published release is a mistake and stops here
+          # commit and reused; a tag with a published release is a mistake and stops here, and so
+          # does any doubt about which it is
           force=""
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            published=$(gh release view "$tag" --json isDraft --jq '.isDraft | not' 2>/dev/null || echo false)
-            if [ "$published" = "true" ]; then
+            if answer=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>&1); then
               echo "$tag is already released"; exit 1
+            elif ! grep -q "HTTP 404" <<< "$answer"; then
+              echo "could not check $tag: $answer"; exit 1
             fi
             echo "$tag exists but was never published: moving it to this commit"
             force="-f"
           fi
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag $force -a "$tag" -m "Jollyvideo ${{ inputs.version }}"
+          git tag $force -a "$tag" -m "Jollyvideo $VERSION"
           git push $force origin "$tag"
 
   # check, all tests (media and package included) and the build, as on every push
   build:
     needs: tag
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   release:
     needs: [tag, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # the build provenance: which workflow built which files from which commit
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with: { name: jollyvideo, path: artifacts }
-      - name: Release notes
+      # exactly the files the build job made: the artifact belongs to the whole run
+      - name: Check the files
+        env:
+          SUMS: ${{ needs.build.outputs.sums }}
         run: |
-          version="${{ inputs.version }}"
+          cd artifacts
+          tr ';' '\n' <<< "$SUMS" | sed '/^$/d' > "$RUNNER_TEMP/sums"
+          sha256sum -c "$RUNNER_TEMP/sums"
+          [ "$(ls | sort)" = "$(awk '{ print $2 }' "$RUNNER_TEMP/sums" | sort)" ] || { echo "unexpected files"; ls; exit 1; }
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+      - name: Release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
           {
-            echo "**Install:** unpack \`jollyvideo-$version.zip\` into Sharkord's \`plugins\` folder, restart Sharkord and turn the plugin on (see the README). The \`.sha256\` files hold the checksums."
+            echo "**Install:** unpack \`jollyvideo-$VERSION.zip\` into Sharkord's \`plugins\` folder, restart Sharkord and turn the plugin on (see the README). The \`.sha256\` files hold the checksums, and \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` shows the file was built here."
             echo
             echo "## What's new"
             echo
-            awk -v heading="## $version" '$0 == heading { found = 1; next } /^## / { found = 0 } found' CHANGELOG.md
+            awk -v heading="## $VERSION" '$0 == heading { found = 1; next } /^## / { found = 0 } found' CHANGELOG.md
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ needs.tag.outputs.tag }}
           name: Jollyvideo ${{ inputs.version }}

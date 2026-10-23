@@ -5,7 +5,7 @@
  * JOLLYVIDEO_YT_DLP, or one on PATH.
  */
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { QUALITIES } from "../../src/server/settings";
@@ -22,17 +22,12 @@ describe.skipIf(!ytDlp)("yt-dlp", () => {
   const wrapper = script(
     dir,
     "yt-dlp",
-    `args=()
-for arg in "$@"; do
-  if [ "$arg" = "--" ]; then args+=("--proxy" "http://127.0.0.1:9" "--socket-timeout" "2" "--retries" "0" "--extractor-retries" "0"); fi
-  args+=("$arg")
-done
-"${ytDlp}" "\${args[@]}" > "${dir}/out.txt" 2>&1
+    `"${ytDlp}" --proxy http://127.0.0.1:9 --socket-timeout 2 --retries 0 --extractor-retries 0 "$@" > "${dir}/out.txt" 2>&1
 echo $? > "${dir}/code.txt"
 exit 0`,
   );
   const youtube = createYouTube(
-    () => ({ path: wrapper, ffmpeg: "/usr/bin/ffmpeg", cookies: path.join(dir, "cookies.txt"), scratch: dir, jsRuntime: { args: ["--js-runtimes", `bun:${process.execPath}`], env: process.env } }),
+    () => ({ path: wrapper, ffmpeg: "/usr/bin/ffmpeg", cookies: path.join(dir, "cookies.txt"), scratch: dir, jsRuntime: { args: ["--js-runtimes", `bun:${process.execPath}`], env: {} } }),
     { error() {} },
   );
   const accepted = () => ({ code: readFileSync(path.join(dir, "code.txt"), "utf-8").trim(), output: readFileSync(path.join(dir, "out.txt"), "utf-8") });
@@ -51,7 +46,10 @@ exit 0`,
     live: false,
     start: 0,
     url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    parts: { video: { formatId: "136", format: "136/bv[height<=720]", ext: "mp4", size: null }, audio: { formatId: "251", format: "251/ba", ext: "webm", size: null } },
+    parts: {
+      video: { formatId: "136", format: "136/bv[height<=720]", codec: "avc1", copy: false, ext: "mp4", size: null },
+      audio: { formatId: "251", format: "251/ba[acodec=opus][audio_channels<=?2]", codec: "opus", copy: true, ext: "webm", size: null },
+    },
     format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
     fps: 30,
   };
@@ -66,11 +64,31 @@ exit 0`,
     parsed();
   });
 
+  it("downloads from the lookup's info JSON without looking the video up again", async () => {
+    const info = path.join(dir, "info.json");
+    writeFileSync(
+      info,
+      JSON.stringify({
+        id: "dQw4w9WgXcQ",
+        title: "t",
+        extractor: "youtube",
+        extractor_key: "Youtube",
+        webpage_url: video.url,
+        formats: [{ format_id: "136", url: "https://127.0.0.1:9/v.mp4", ext: "mp4", vcodec: "avc1", acodec: "none", protocol: "https", height: 720 }],
+      }),
+    );
+    const parts = path.join(dir, "parts");
+    mkdirSync(parts, { recursive: true });
+    await youtube.downloadPart({ ...video, info }, video.parts!.video, path.join(parts, "video.mp4"), () => {}, new AbortController().signal).catch(() => {});
+    parsed();
+    expect(accepted().output).toContain("Downloading 1 format(s): 136");
+  });
+
   it("accepts the arguments of a merged download", async () => {
     await youtube.downloadMerged(video, dir, () => {}, new AbortController().signal).catch(() => {});
     parsed();
     // each run used its own copy of the cookies, and removed it
-    expect(readdirSync(dir).filter((name) => name.startsWith("cookies-"))).toEqual([]);
+    expect(readdirSync(dir).filter((name) => /^[0-9a-f-]{36}$/.test(name))).toEqual([]);
   });
 
   it("accepts the arguments of a playlist lookup", async () => {

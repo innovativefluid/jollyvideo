@@ -11,9 +11,6 @@ export type TVideo = {
   /** seconds; 0 for livestreams and while still loading */
   duration: number;
   live: boolean;
-  /** same-origin path of the cached thumbnail, or "" */
-  thumbnail: string;
-  addedBy: number;
 };
 
 export type TQueueEntry = TVideo & {
@@ -25,6 +22,8 @@ export type TQueueEntry = TVideo & {
 };
 
 export type TNowPlaying = TVideo & {
+  /** same-origin path of the cached thumbnail, or "" */
+  thumbnail: string;
   state: "loading" | "playing" | "paused";
   /** seconds into the video when this state was produced */
   position: number;

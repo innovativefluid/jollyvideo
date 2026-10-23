@@ -87,6 +87,21 @@ describe("the server half", () => {
     await expect(host.action("add", USER, undefined, { query: "x" })).rejects.toThrow("error.joinVoice");
   });
 
+  it("updates yt-dlp only for admins, even if others may use the command", async () => {
+    await expect(host.command("watch-update", MODERATOR, CHANNEL)).rejects.toThrow("Only server admins");
+  });
+
+  it("does not take orders from someone a moderator disconnected", async () => {
+    const OTHER = 7;
+    const ELSEWHERE = 6;
+    expect(await host.action("state", OTHER, ELSEWHERE)).not.toBeNull();
+    // Sharkord still has the channel as theirs
+    host.disconnect(OTHER, ELSEWHERE);
+    expect(await host.action("state", OTHER, ELSEWHERE)).toBeNull();
+    await expect(host.action("add", OTHER, ELSEWHERE, { query: "x" })).rejects.toThrow("error.joinVoice");
+    await expect(host.command("watch-skip", OTHER, ELSEWHERE)).rejects.toThrow("Join a voice channel");
+  });
+
   it("plays what someone adds, as a stream in the channel", async () => {
     const viewer = (await host.action("add", USER, CHANNEL, { query: "https://youtu.be/dQw4w9WgXcQ" })) as TViewer;
     expect(viewer.player.now).toMatchObject({ state: "loading" });

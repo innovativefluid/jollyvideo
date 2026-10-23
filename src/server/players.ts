@@ -1,4 +1,5 @@
 /** One player per voice channel, and getting their state to the people in it. */
+import type { TPlayer } from "../contract";
 import type { ChannelPlayer } from "./player";
 
 /**
@@ -36,7 +37,18 @@ export const closeWhenEmpty = (options: {
 };
 const PUSH_DELAY_MS = 100;
 /** clients count the position up themselves; this corrects their drift */
-const RESYNC_MS = 10_000;
+const RESYNC_MS = 30_000;
+/** Sharkord drops a push over 64 KB */
+const PUSH_MAX_BYTES = 60 * 1024;
+
+/** the state as it fits into one push: a long queue of long titles loses its end */
+export const fitted = (state: TPlayer): TPlayer => {
+  let fitting = state;
+  while (fitting.queue.length && Buffer.byteLength(JSON.stringify(fitting)) > PUSH_MAX_BYTES) {
+    fitting = { ...fitting, queue: fitting.queue.slice(0, Math.floor(fitting.queue.length * 0.8)) };
+  }
+  return fitting;
+};
 
 export class Players {
   private readonly players = new Map<number, ChannelPlayer>();
@@ -49,7 +61,7 @@ export class Players {
     private readonly push: (player: ChannelPlayer) => void,
   ) {
     this.resync = setInterval(() => {
-      for (const player of this.players.values()) if (player.busy) this.push(player);
+      for (const player of this.players.values()) if (player.playing) this.push(player);
     }, RESYNC_MS);
   }
 
