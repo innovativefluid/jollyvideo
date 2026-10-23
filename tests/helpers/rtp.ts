@@ -8,6 +8,8 @@ export type TCapture = {
   packets: number;
   /** distinct RTP timestamps, one per video frame */
   frames: number;
+  /** frames per second of video time, from the timestamps (90 kHz): unlike `frames`, not thrown off by a late or bursty sender */
+  fps(): number;
   keyframes: number;
   /** from the H.264 SPS: profile_idc and level_idc */
   profile?: number;
@@ -37,8 +39,21 @@ const nalTypes = (payload: Uint8Array): { type: number; offset: number }[] => {
 };
 
 export const capture = async (router: Router, producer: Producer): Promise<TCapture> => {
-  const result: TCapture = { packets: 0, frames: 0, keyframes: 0, payloadTypes: new Set(), close: () => {} };
   const timestamps = new Set<number>();
+  const result: TCapture = {
+    packets: 0,
+    frames: 0,
+    keyframes: 0,
+    payloadTypes: new Set(),
+    fps: () => {
+      // the typical step from one frame to the next, so the starting point and wrap-around do not matter
+      const all = [...timestamps];
+      const steps = all.slice(1).map((timestamp, index) => (timestamp - all[index]!) >>> 0).sort((x, y) => x - y);
+      const step = steps[Math.floor(steps.length / 2)];
+      return step ? 90_000 / step : 0;
+    },
+    close: () => {},
+  };
   let lastKeyframeTs = -1;
   const socket = await Bun.udpSocket({
     hostname: "127.0.0.1",

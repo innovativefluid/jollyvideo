@@ -115,9 +115,10 @@ describe("a file", () => {
     const [video, audio] = await Promise.all([measure(stream.producers.video!, 3000), measure(stream.producers.audio!, 3000)]);
     await encoder.stop();
     output.remove();
-    // 3 s at 30 fps; a busy 2-core runner can drop a few
+    // 30 fps from a 60 fps source; and it keeps up: a busy 2-core runner can drop a few of the 90
+    expect(video.fps()).toBeGreaterThan(28);
+    expect(video.fps()).toBeLessThan(32);
     expect(video.frames).toBeGreaterThanOrEqual(75);
-    expect(video.frames).toBeLessThanOrEqual(95);
     expect(video.keyframes).toBeGreaterThanOrEqual(2);
     expect([video.profile, video.level]).toEqual([66, 31]);
     // Opus in 20 ms packets
@@ -130,6 +131,7 @@ describe("a file", () => {
     const video = await measure(stream.producers.video!, 2000);
     await encoder.stop();
     output.remove();
+    expect(video.fps()).toBeGreaterThan(57);
     expect(video.frames).toBeGreaterThanOrEqual(105);
     expect(video.level).toBe(32);
   }, 20_000);
