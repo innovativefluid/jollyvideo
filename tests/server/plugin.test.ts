@@ -52,8 +52,8 @@ beforeAll(async () => {
   await onLoad(host.ctx as never);
 });
 
-afterAll(() => {
-  onUnload();
+afterAll(async () => {
+  await onUnload();
   worker.close();
   delete process.env.JOLLYVIDEO_YT_DLP;
   delete process.env.JOLLYVIDEO_FFMPEG;
@@ -73,7 +73,7 @@ describe("the server half", () => {
     });
     expect(host.commands.get("watch-update")!.ephemeral).toBe(true);
     expect([...host.routes.keys()]).toEqual(["/thumb/*"]);
-    expect([...host.events.keys()]).toEqual(["voice:runtime_closed"]);
+    expect([...host.events.keys()]).toEqual(["user:left_voice", "user:joined_voice", "voice:runtime_closed"]);
     expect(host.ui()).toEqual({ voice_controls: "JOIN_VOICE_CHANNELS" });
     expect([...host.settings.keys()]).toEqual(["quality", "maxMinutes", "maxStreams", "updateYtDlp"]);
   });
@@ -81,7 +81,7 @@ describe("the server half", () => {
   it("only works from a voice channel", async () => {
     expect(await host.action("state", USER, undefined)).toBeNull();
     expect(await host.action("state", USER, CHANNEL)).toEqual({
-      player: { channelId: CHANNEL, now: null, queue: [], locked: false, error: null },
+      player: { channelId: CHANNEL, rev: expect.any(Number), now: null, queue: [], locked: false, error: null },
       canModerate: false,
     });
     await expect(host.action("add", USER, undefined, { query: "x" })).rejects.toThrow("Join a voice channel first");
@@ -91,9 +91,10 @@ describe("the server half", () => {
     const viewer = (await host.action("add", USER, CHANNEL, { query: "https://youtu.be/dQw4w9WgXcQ" })) as TViewer;
     expect(viewer.player.now).toMatchObject({ state: "loading" });
     const playing = await waitFor(() => (lastPush()?.now?.state === "playing" ? lastPush() : undefined));
-    expect(playing.now).toMatchObject({ title: "Test video", duration: 120, thumbnail: "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg" });
+    expect(playing.now).toMatchObject({ title: "Test video", duration: 120 });
+    expect(playing.now!.thumbnail).toMatch(/^\/plugins\/jollyvideo\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\.jpg$/);
     expect(host.streams).toHaveLength(1);
-    expect(host.streams[0]!.options).toMatchObject({ channelId: CHANNEL, title: "Test video", bannerUrl: "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg" });
+    expect(host.streams[0]!.options).toMatchObject({ channelId: CHANNEL, title: "Test video", bannerUrl: playing.now!.thumbnail });
   });
 
   it("serves no thumbnail it was not asked for", async () => {
@@ -138,7 +139,7 @@ describe("the server half", () => {
     await host.action("control", MODERATOR, CHANNEL, { op: "lock", locked: true });
     (host.events.get("voice:runtime_closed") as (payload: { channelId: number }) => void)({ channelId: CHANNEL });
     expect(host.streams[0]!.removed).toBe(true);
-    expect(((await host.action("state", USER, CHANNEL)) as TViewer).player).toEqual({ channelId: CHANNEL, now: null, queue: [], locked: false, error: null });
+    expect(((await host.action("state", USER, CHANNEL)) as TViewer).player).toMatchObject({ channelId: CHANNEL, now: null, queue: [], locked: false, error: null });
   });
 
   it("answers /watch in the chat", async () => {

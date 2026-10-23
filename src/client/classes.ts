@@ -20,7 +20,7 @@ export const cls = {
   iconButtonOn: `${BUTTON} rounded-md transition-all bg-secondary text-secondary-foreground hover:bg-secondary/80 size-9`,
   /** PopoverContent, opening upwards */
   panel:
-    "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[side=top]:slide-in-from-bottom-2 z-50 w-80 rounded-md border p-4 shadow-md outline-hidden fixed flex flex-col gap-3 overflow-y-auto",
+    "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=top]:slide-in-from-bottom-2 z-50 w-80 rounded-md border p-4 shadow-md outline-hidden fixed flex flex-col gap-3 overflow-y-auto",
   /** Input */
   input:
     "file:text-foreground placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground dark:bg-input/30 border-input h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",

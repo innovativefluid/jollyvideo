@@ -44,18 +44,19 @@ const queue: TQueueEntry[] = [
 ];
 
 const scenarios: Record<string, TViewer> = {
-  empty: { player: { channelId: 1, now: null, queue: [], locked: false, error: null }, canModerate: false },
-  playing: { player: { channelId: 1, now: now(), queue, locked: false, error: null }, canModerate: false },
-  live: { player: { channelId: 1, now: now({ title: "lofi hip hop radio 📚 - beats to relax/study to", live: true, duration: 0, thumbnail: thumbnail(280) }), queue: [], locked: false, error: null }, canModerate: false },
-  loading: { player: { channelId: 1, now: now({ state: "loading", progress: 0.42, position: 0 }), queue: [], locked: false, error: null }, canModerate: false },
-  locked: { player: { channelId: 1, now: now({ state: "paused" }), queue: queue.slice(0, 2), locked: true, error: null }, canModerate: false },
-  moderator: { player: { channelId: 1, now: now(), queue: queue.slice(0, 1), locked: true, error: "This video is private" }, canModerate: true },
+  empty: { player: { channelId: 1, rev: 1, now: null, queue: [], locked: false, error: null }, canModerate: false },
+  playing: { player: { channelId: 1, rev: 1, now: now(), queue, locked: false, error: null }, canModerate: false },
+  live: { player: { channelId: 1, rev: 1, now: now({ title: "lofi hip hop radio 📚 - beats to relax/study to", live: true, duration: 0, thumbnail: thumbnail(280) }), queue: [], locked: false, error: null }, canModerate: false },
+  loading: { player: { channelId: 1, rev: 1, now: now({ state: "loading", progress: 0.42, position: 0 }), queue: [], locked: false, error: null }, canModerate: false },
+  locked: { player: { channelId: 1, rev: 1, now: now({ state: "paused" }), queue: queue.slice(0, 2), locked: true, error: null }, canModerate: false },
+  moderator: { player: { channelId: 1, rev: 1, now: now(), queue: queue.slice(0, 1), locked: true, error: "This video is private" }, canModerate: true },
 };
 
 let viewer: TViewer = structuredClone(scenarios[scenario] ?? scenarios.playing!);
 let push: ((data: unknown) => void) | undefined;
 const update = (player: TPlayer) => {
-  viewer = { ...viewer, player };
+  viewer = { ...viewer, player: { ...player, rev: player.rev + 1 } };
+  player = viewer.player;
   setTimeout(() => push?.(player), 0);
 };
 

@@ -59,6 +59,8 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
   const connections: (TConnection & { closed: boolean })[] = [];
   let removed = 0;
   let slots = true;
+  let freed = 0;
+  let encodeError: Error | null = null;
   let clock = 0;
   const errors: unknown[] = [];
 
@@ -107,6 +109,7 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
       },
     }),
     encode(options, events) {
+      if (encodeError) throw encodeError;
       const exited = deferred<TExit>();
       const fake: TFakeEncoder = {
         options,
@@ -127,6 +130,7 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
     },
     thumbnail: (videoId) => `/thumb/${videoId}.jpg`,
     slotFree: () => slots,
+    slotFreed: () => freed++,
     changed: () => {},
     log: { log() {}, error: (...args) => errors.push(args) },
     now: () => clock,
@@ -143,6 +147,8 @@ const setup = (videos: Record<string, TResolved | Error>, settingsOverride: Part
     cacheDir,
     removed: () => removed,
     setSlots: (value: boolean) => (slots = value),
+    freed: () => freed,
+    failEncode: (error: Error | null) => (encodeError = error),
     tick: (ms: number) => (clock += ms),
     /** finishes the download of video `id`, into file<id>.mkv */
     downloaded: async (id: string) => {
@@ -423,6 +429,56 @@ describe("ChannelPlayer", () => {
     expect(t.encoders[0]!.stopped).toBe(true);
     expect(t.removed()).toBe(1);
     expect(() => t.player.add("a", 1)).toThrow(UserError);
+  });
+
+  it("says when it is too early to pause or seek", async () => {
+    const t = await start({ a: vod("a") });
+    t.player.add("a", 1);
+    // not looked up yet
+    expect(() => t.player.seek(10)).toThrow("Still loading");
+    await flush();
+    // looked up, still downloading
+    expect(() => t.player.pause()).toThrow("Still loading");
+    expect(t.player.snapshot().now?.state).toBe("loading");
+  });
+
+  it("closes the transports when ffmpeg cannot even start", async () => {
+    const t = await start({ a: vod("a") });
+    t.failEncode(new Error("spawn ENOENT"));
+    t.player.add("a", 1);
+    await flush();
+    await t.downloaded("a");
+    expect(t.connections).toHaveLength(1);
+    expect(t.connections[0]!.closed).toBe(true);
+    expect(t.player.snapshot()).toMatchObject({ now: null, error: "Something went wrong" });
+  });
+
+  it("waits for a free slot, and starts when it gets one", async () => {
+    const t = await start({ a: vod("a"), b: vod("b") });
+    t.player.add("a", 1);
+    t.player.add("b", 1);
+    await flush();
+    await t.downloaded("a");
+    t.encoders[0]!.start();
+    t.setSlots(false);
+    t.encoders[0]!.exit(0);
+    await flush();
+    expect(t.player.snapshot()).toMatchObject({ now: null, queue: [{ title: "Video b" }], error: "Too many videos are playing on this server" });
+    expect(t.player.busy).toBe(false);
+    t.setSlots(true);
+    t.player.retry();
+    await t.downloaded("b");
+    expect(t.player.snapshot().now?.title).toBe("Video b");
+    t.encoders[1]!.exit(0);
+    await flush();
+    expect(t.freed()).toBe(1);
+  });
+
+  it("counts its revision up with every change", async () => {
+    const t = await start({ a: vod("a") });
+    const before = t.player.snapshot().rev;
+    t.player.setLocked(true);
+    expect(t.player.snapshot().rev).toBeGreaterThan(before);
   });
 
   it("refuses more than a full queue", async () => {

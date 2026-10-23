@@ -31,6 +31,8 @@ export type TNowPlaying = TVideo & {
 
 export type TPlayer = {
   channelId: number;
+  /** grows with every change, so an answer that arrives late cannot undo a newer push */
+  rev: number;
   now: TNowPlaying | null;
   queue: TQueueEntry[];
   /** only moderators control playback while locked */

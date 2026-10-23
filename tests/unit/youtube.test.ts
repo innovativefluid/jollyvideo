@@ -63,9 +63,9 @@ describe("parseQuery", () => {
     expect(() => parseQuery("x".repeat(501))).toThrow("too long");
   });
 
-  it("always passes the source after --, with config files ignored", () => {
-    const args = commonArgs({ path: "/y", cookies: "/c.txt", jsRuntime: { args: ["--js-runtimes", "bun:/bun"], env: {} } });
-    expect(args).toEqual(["--ignore-config", "--no-playlist", "--no-warnings", "--js-runtimes", "bun:/bun", "--cookies", "/c.txt"]);
+  it("ignores config files and passes the JavaScript runtime", () => {
+    const args = commonArgs({ path: "/y", cookies: "/c.txt", scratch: "/tmp", jsRuntime: { args: ["--js-runtimes", "bun:/bun"], env: {} } });
+    expect(args).toEqual(["--ignore-config", "--no-playlist", "--no-warnings", "--js-runtimes", "bun:/bun"]);
   });
 });
 

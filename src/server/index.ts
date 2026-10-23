@@ -7,8 +7,8 @@ import { MAX_QUERY_LENGTH, type TControl, type TJollyvideo, type TPlayer, type T
 import { startEncoder } from "./encoder";
 import { errorText, UserError } from "./errors";
 import { createOutput } from "./output";
-import { ChannelPlayer } from "./player";
-import { Players } from "./players";
+import { ChannelPlayer, currentRevision } from "./player";
+import { closeWhenEmpty, Players } from "./players";
 import { readSettings, SETTINGS } from "./settings";
 import { Thumbnails } from "./thumbnails";
 import { Toolbox } from "./tools";
@@ -20,8 +20,10 @@ const MODERATOR = "MOVE_MEMBERS" as Permission;
 const ADMIN = "MANAGE_PLUGINS" as Permission;
 
 const DAY_MS = 86_400_000;
+/** a channel left empty this long stops playing, so it gives its slot back */
+const EMPTY_CHANNEL_MS = 60_000;
 
-let unload: (() => void) | null = null;
+let unload: (() => Promise<void>) | null = null;
 
 export const parseControl = (payload: unknown): TControl => {
   const p = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
@@ -45,10 +47,10 @@ export const parseControl = (payload: unknown): TControl => {
   throw new UserError("Unknown control");
 };
 
-const idle = (channelId: number): TPlayer => ({ channelId, now: null, queue: [], locked: false, error: null });
+const idle = (channelId: number): TPlayer => ({ channelId, rev: currentRevision(), now: null, queue: [], locked: false, error: null });
 
 export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => {
-  unload?.();
+  await unload?.();
   const log = ctx.logger;
 
   const settingsStore = await ctx.settings.register(SETTINGS);
@@ -90,7 +92,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
   };
 
   const youtube = createYouTube(
-    () => ({ path: toolbox.ytDlp() ?? "yt-dlp", ffmpeg: toolbox.ffmpeg(), cookies: toolbox.cookies(), jsRuntime }),
+    () => ({ path: toolbox.ytDlp() ?? "yt-dlp", ffmpeg: toolbox.ffmpeg(), cookies: toolbox.cookies(), scratch: cacheDir, jsRuntime }),
     log,
   );
   const thumbnails = new Thumbnails(`/plugins/${ctx.pluginId}`, log);
@@ -108,6 +110,7 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
         encode: startEncoder,
         thumbnail: (videoId) => thumbnails.url(videoId),
         slotFree: () => players.busyCount() < settings().maxStreams,
+        slotFreed: () => players.slotFreed(),
         changed: (player) => players.changed(player),
         log,
         now: Date.now,
@@ -121,7 +124,21 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     },
   );
 
-  ctx.events.on("voice:runtime_closed", ({ channelId }) => players.close(channelId));
+  const empty = closeWhenEmpty({
+    isEmpty: (channelId) => {
+      try {
+        return ctx.voice.getState(channelId).users.length === 0;
+      } catch {
+        return true;
+      }
+    },
+    hasPlayer: (channelId) => !!players.get(channelId),
+    close: (channelId) => void players.close(channelId),
+    delayMs: EMPTY_CHANNEL_MS,
+  });
+  ctx.events.on("user:left_voice", ({ channelId }) => empty.left(channelId));
+  ctx.events.on("user:joined_voice", ({ channelId }) => empty.joined(channelId));
+  ctx.events.on("voice:runtime_closed", ({ channelId }) => void players.close(channelId));
 
   const canModerate = (userId: number) => ctx.permissions.userCan(userId, MODERATOR);
 
@@ -277,14 +294,16 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
 
   ctx.ui.enable({ voice_controls: IN_VOICE });
 
-  unload = () => {
-    clearInterval(updater);
-    players.closeAll();
+  unload = async () => {
     unload = null;
+    clearInterval(updater);
+    empty.stop();
+    // ffmpeg has to let go of the downloads before the next load clears them
+    await Promise.race([players.closeAll(), Bun.sleep(5_000)]);
   };
   log.log("[jollyvideo] loaded");
 };
 
-export const onUnload = (): void => {
-  unload?.();
+export const onUnload = async (): Promise<void> => {
+  await unload?.();
 };

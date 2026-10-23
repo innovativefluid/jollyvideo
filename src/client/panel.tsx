@@ -23,19 +23,21 @@ const useTicking = (active: boolean) => {
   }, [active]);
 };
 
-type TPlace = { left: number; bottom: number; maxHeight: number };
+type TPlace = { side: "top" | "bottom"; left: number; width: number; top?: number; bottom?: number; maxHeight: number };
 
-/** above the button, inside the window */
-const placeAbove = (anchor: HTMLElement | null): TPlace => {
-  const rect = anchor?.getBoundingClientRect();
-  const left = rect?.left ?? GAP;
-  const top = rect?.top ?? window.innerHeight - GAP;
-  return {
-    left: Math.max(GAP, Math.min(left, window.innerWidth - WIDTH - GAP)),
-    bottom: window.innerHeight - top + GAP,
-    maxHeight: Math.max(160, top - 2 * GAP),
-  };
+/** above the button when there is room, below otherwise; never wider than the window */
+const place = (anchor: HTMLElement | null): TPlace => {
+  const rect = anchor?.getBoundingClientRect() ?? { left: GAP, top: window.innerHeight - GAP, bottom: window.innerHeight - GAP };
+  const width = Math.min(WIDTH, window.innerWidth - 2 * GAP);
+  const left = Math.max(GAP, Math.min(rect.left, window.innerWidth - width - GAP));
+  const above = rect.top - 2 * GAP;
+  const below = window.innerHeight - rect.bottom - 2 * GAP;
+  return above >= 240 || above >= below
+    ? { side: "top", left, width, bottom: window.innerHeight - rect.top + GAP, maxHeight: above }
+    : { side: "bottom", left, width, top: rect.bottom + GAP, maxHeight: below };
 };
+
+const samePlace = (a: TPlace, b: TPlace) => a.side === b.side && a.left === b.left && a.width === b.width && a.top === b.top && a.bottom === b.bottom && a.maxHeight === b.maxHeight;
 
 const send = (op: TControl) => () => void control(op);
 
@@ -82,7 +84,7 @@ const AddRow = (props: { canControl: boolean; canModerate: boolean; locked: bool
           {props.locked ? <Lock /> : <LockOpen />}
         </button>
       ) : props.locked ? (
-        <span className={cls.lockedMark} title="Only moderators can control this right now" aria-label="Locked">
+        <span className={cls.lockedMark} role="img" title="Only moderators can control this right now" aria-label="Locked">
           <Lock className={cls.icon} />
         </span>
       ) : null}
@@ -95,7 +97,7 @@ const Status = ({ now, position }: { now: TNowPlaying; position: number }) => {
     return (
       <span className={cls.row}>
         {now.progress !== null && <span className={cls.meta}>{Math.round(now.progress * 100)}%</span>}
-        <LoaderCircle className={cls.spinner} aria-label="Loading" />
+        <LoaderCircle className={cls.spinner} role="img" aria-label="Loading" />
       </span>
     );
   }
@@ -140,7 +142,7 @@ const NowPlaying = ({ now, position, canControl }: { now: TNowPlaying; position:
 );
 
 const queueMeta = (entry: TQueueEntry): ReactNode => {
-  if (entry.state === "resolving") return <LoaderCircle className={cls.spinner} aria-label="Loading" />;
+  if (entry.state === "resolving") return <LoaderCircle className={cls.spinner} role="img" aria-label="Loading" />;
   if (entry.progress !== null) return `${Math.round(entry.progress * 100)}%`;
   return entry.live ? "LIVE" : formatTime(entry.duration);
 };
@@ -154,7 +156,7 @@ const Queue = ({ queue, canControl }: { queue: TQueueEntry[]; canControl: boolea
           {entry.title}
         </span>
         {canControl && (
-          <button type="button" className={cls.smallIconButton} title="Remove" aria-label="Remove" onClick={send({ op: "remove", id: entry.id })}>
+          <button type="button" className={cls.smallIconButton} title="Remove" aria-label={`Remove ${entry.title}`} onClick={send({ op: "remove", id: entry.id })}>
             <X />
           </button>
         )}
@@ -166,19 +168,34 @@ const Queue = ({ queue, canControl }: { queue: TQueueEntry[]; canControl: boolea
 export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | null>; onClose(): void }) => {
   const view = useView();
   const panel = useRef<HTMLDivElement>(null);
-  const [place, setPlace] = useState<TPlace>(() => placeAbove(anchor.current));
+  const [where, setWhere] = useState<TPlace>(() => place(anchor.current));
 
+  // follows the button when the window or the layout around it changes
   useLayoutEffect(() => {
-    const update = () => setPlace(placeAbove(anchor.current));
+    const update = () => setWhere((old) => {
+      const next = place(anchor.current);
+      return samePlace(old, next) ? old : next;
+    });
     update();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
+    observer?.observe(document.body);
     window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
   }, [anchor]);
 
   useEffect(() => {
     void refresh();
+    // Escape belongs to the panel only while focus is in it, not to the chat box
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      const focus = document.activeElement;
+      if (event.key !== "Escape" || !(panel.current?.contains(focus) || anchor.current === focus)) return;
+      onClose();
+      anchor.current?.focus();
     };
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -205,9 +222,9 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
       role="dialog"
       aria-label="Watch together"
       data-state="open"
-      data-side="top"
+      data-side={where.side}
       className={cls.panel}
-      style={{ left: place.left, bottom: place.bottom, maxHeight: place.maxHeight }}
+      style={{ left: where.left, width: where.width, top: where.top, bottom: where.bottom, maxHeight: where.maxHeight }}
     >
       <AddRow canControl={canControl} canModerate={view.canModerate} locked={locked} busy={view.busy} />
       {now && <NowPlaying now={now} position={positionOf(view)} canControl={canControl} />}

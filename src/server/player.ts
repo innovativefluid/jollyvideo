@@ -26,6 +26,8 @@ export type TPlayerDeps = {
   thumbnail(videoId: string): string;
   /** whether one more video may start playing on the server */
   slotFree(): boolean;
+  /** this player stopped holding a slot, so a waiting one may start */
+  slotFreed(): void;
   changed(player: ChannelPlayer): void;
   log: { log(...args: unknown[]): void; error(...args: unknown[]): void };
   now(): number;
@@ -64,6 +66,10 @@ const ERROR_SHOWN_MS = 15_000;
 
 const minutes = (seconds: number) => Math.round(seconds / 60);
 
+/** one count across every player, so a new player never goes back in time */
+let revisions = 0;
+export const currentRevision = (): number => revisions;
+
 export class ChannelPlayer {
   private queue: TItem[] = [];
   private current: TCurrent | null = null;
@@ -72,6 +78,7 @@ export class ChannelPlayer {
   private error: string | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | undefined;
   private destroyed = false;
+  private rev = ++revisions;
 
   constructor(
     readonly channelId: number,
@@ -121,6 +128,7 @@ export class ChannelPlayer {
     const current = this.requireCurrent();
     if (current.item.video?.live) throw new UserError("Livestreams can't be paused");
     if (current.state === "paused") return;
+    if (current.state !== "playing") throw new UserError("Still loading");
     current.base = this.position(current);
     current.state = "paused";
     this.stopRun(current);
@@ -139,7 +147,8 @@ export class ChannelPlayer {
   seek(position: number): void {
     const current = this.requireCurrent();
     const video = current.item.video;
-    if (!video || video.live) throw new UserError("Livestreams can't be seeked");
+    if (!video) throw new UserError("Still loading");
+    if (video.live) throw new UserError("Livestreams can't be seeked");
     const end = video.duration > 0 ? video.duration - 1 : Number.MAX_SAFE_INTEGER;
     const target = Math.max(0, Math.min(end, Math.floor(position)));
     current.base = target;
@@ -178,20 +187,27 @@ export class ChannelPlayer {
     this.changed();
   }
 
+  /** starts the queue again after it waited for a free slot */
+  retry(): void {
+    if (!this.current && this.queue.length && !this.destroyed) void this.advance();
+  }
+
   setLocked(locked: boolean): void {
     this.locked = locked;
     this.changed();
   }
 
-  /** stops everything and takes the stream down; the player is unusable afterwards */
-  destroy(): void {
+  /** stops everything and takes the stream down; the player is unusable afterwards. Resolves once ffmpeg is gone. */
+  destroy(): Promise<void> {
     this.destroyed = true;
     for (const item of this.queue.splice(0)) this.discard(item);
     const current = this.current;
     this.current = null;
-    if (current) this.discard(current.item, this.stopRun(current));
+    const stopped = current ? this.stopRun(current) : Promise.resolve();
+    if (current) this.discard(current.item, stopped);
     this.takeDown();
     clearTimeout(this.errorTimer);
+    return stopped;
   }
 
   snapshot(): TPlayer {
@@ -207,6 +223,7 @@ export class ChannelPlayer {
     });
     return {
       channelId: this.channelId,
+      rev: this.rev,
       now: current ? { ...entry(current.item), state: current.state, position: Math.floor(this.position(current)) } : null,
       queue: this.queue.map((item): TQueueEntry => ({ ...entry(item), state: item.video ? "ready" : "resolving" })),
       locked: this.locked,
@@ -226,6 +243,7 @@ export class ChannelPlayer {
   }
 
   private changed() {
+    this.rev = ++revisions;
     if (!this.destroyed) this.deps.changed(this);
   }
 
@@ -325,6 +343,7 @@ export class ChannelPlayer {
     if (!item) {
       this.takeDown();
       this.changed();
+      this.deps.slotFreed();
       return;
     }
     if (!this.deps.slotFree()) {
@@ -375,10 +394,9 @@ export class ChannelPlayer {
         connection.close();
         return;
       }
-      const run: TRun = {
-        connection,
-        onAir: false,
-        encoder: this.deps.encode(
+      let encoder: TEncoder;
+      try {
+        encoder = this.deps.encode(
           {
             ffmpeg,
             input: video.live ? video.hls!.url : current.item.file!,
@@ -390,8 +408,10 @@ export class ChannelPlayer {
             audio: connection.audio,
           },
           {
+            // ffmpeg reports progress only after this function has returned and `run` is set
             started: () => {
-              if (current.run !== run || this.current !== current) return;
+              const run = current.run;
+              if (run?.connection !== connection || this.current !== current) return;
               try {
                 output.publish(connection, this.label(video));
               } catch (error) {
@@ -403,10 +423,15 @@ export class ChannelPlayer {
               this.changed();
             },
           },
-        ),
-      };
+        );
+      } catch (error) {
+        // ffmpeg could not even start: the transports were for nothing
+        connection.close();
+        throw error;
+      }
+      const run: TRun = { connection, onAir: false, encoder };
       current.run = run;
-      void run.encoder.exited.then((exit) => this.ended(current, run, exit));
+      void encoder.exited.then((exit) => this.ended(current, run, exit));
     })().catch((error) => {
       if (this.current === current && current.attempt === attempt) this.finish(current, error);
     });

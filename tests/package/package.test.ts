@@ -37,7 +37,7 @@ it("loads and unloads its server half", async () => {
   await plugin.onLoad(host.ctx);
   expect([...host.actions.keys()]).toEqual(["state", "add", "control"]);
   expect(await host.action("state", 1, 2)).toMatchObject({ player: { channelId: 2 } });
-  plugin.onUnload();
+  await plugin.onUnload();
   delete process.env.JOLLYVIDEO_YT_DLP;
   delete process.env.JOLLYVIDEO_FFMPEG;
 });

@@ -32,7 +32,8 @@ const entry = (id: string, extra: Partial<TQueueEntry> = {}): TQueueEntry => ({
   progress: null,
   ...extra,
 });
-const player = (extra: Partial<TPlayer> = {}): TPlayer => ({ channelId: CHANNEL, now: null, queue: [], locked: false, error: null, ...extra });
+let revs = 0;
+const player = (extra: Partial<TPlayer> = {}): TPlayer => ({ channelId: CHANNEL, rev: ++revs, now: null, queue: [], locked: false, error: null, ...extra });
 
 let calls: TCall[];
 let state: TViewer;
@@ -145,7 +146,7 @@ describe("the panel", () => {
     await show({ player: player({ now: now(), queue: [entry("a"), entry("b", { state: "resolving", title: "lofi" }), entry("c", { live: true })] }), canModerate: false });
     const rows = screen.getAllByRole("listitem");
     expect(rows.map((row) => row.textContent)).toEqual(["1:15Next a", "lofi", "LIVENext c"]);
-    await act(async () => fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[0]!));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Remove Next a" })));
     expect(controls()).toEqual([{ op: "remove", id: "a" }]);
   });
 
@@ -155,7 +156,7 @@ describe("the panel", () => {
     expect((screen.getByRole("textbox") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByLabelText("Locked").getAttribute("title")).toBe("Only moderators can control this right now");
     for (const name of ["Pause", "Skip", "Stop"]) expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Remove/ })).toBeNull();
     expect(screen.getByRole("slider").getAttribute("aria-disabled")).toBe("true");
   });
 
@@ -196,6 +197,41 @@ describe("the panel", () => {
     expect(screen.getByRole("dialog")).toBeDefined();
     await act(async () => fireEvent.pointerDown(document.body));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("leaves Escape to the chat box when focus is outside", async () => {
+    const chat = document.createElement("input");
+    document.body.append(chat);
+    await open();
+    chat.focus();
+    await act(async () => fireEvent.keyDown(chat, { key: "Escape" }));
+    expect(screen.getByRole("dialog")).toBeDefined();
+    screen.getByRole("textbox", { name: "YouTube link or search" }).focus();
+    await act(async () => fireEvent.keyDown(document.activeElement!, { key: "Escape" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Watch together" }));
+    chat.remove();
+  });
+
+  it("keeps a newer push over an older answer", async () => {
+    await open();
+    const stale = player({ now: now({ title: "Old" }) });
+    await act(async () => push(player({ now: now({ title: "New" }) })));
+    state = { player: stale, canModerate: true };
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Skip" })));
+    expect(screen.getByText("New")).toBeDefined();
+    // the answer still says what the user may do
+    expect(screen.getByRole("button", { name: "Lock" })).toBeDefined();
+  });
+
+  it("opens downwards when the button is near the top", async () => {
+    render(<VoiceButton />);
+    const button = screen.getByRole("button", { name: "Watch together" });
+    button.getBoundingClientRect = () => ({ left: 10, top: 20, bottom: 52, right: 42, width: 32, height: 32, x: 10, y: 20, toJSON() {} }) as DOMRect;
+    await act(async () => fireEvent.click(button));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("data-side")).toBe("bottom");
+    expect(dialog.style.top).toBe("60px");
   });
 
   it("ignores pushes for other channels", async () => {

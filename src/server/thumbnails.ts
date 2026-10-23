@@ -2,11 +2,16 @@
  * Video thumbnails, fetched by the server so viewers' browsers never contact
  * YouTube. Only videos someone queued are served, and only the last few are
  * kept in memory.
+ *
+ * The route has to be public (an <img> sends no token), so its URLs carry a
+ * random key made at load: without it nobody can ask which videos were played.
  */
 import type { IncomingMessage, ServerResponse } from "http";
 
 const MAX_KEPT = 200;
 const MAX_BYTES = 512 * 1024;
+/** a thumbnail YouTube would not give is not asked for again for this long */
+const RETRY_AFTER_MS = 5 * 60_000;
 
 type TLog = { error(...args: unknown[]): void };
 
@@ -14,6 +19,7 @@ export class Thumbnails {
   /** video id → image, or the fetch still running; oldest first */
   private readonly kept = new Map<string, Promise<Uint8Array | null>>();
   private readonly allowed = new Set<string>();
+  private readonly key = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
 
   constructor(
     private readonly base: string,
@@ -30,7 +36,7 @@ export class Thumbnails {
       this.allowed.delete(oldest);
       this.kept.delete(oldest);
     }
-    return `${this.base}/thumb/${videoId}.jpg`;
+    return `${this.base}/thumb/${this.key}/${videoId}.jpg`;
   }
 
   private image(videoId: string): Promise<Uint8Array | null> {
@@ -41,14 +47,16 @@ export class Thumbnails {
         return null;
       });
       this.kept.set(videoId, image);
-      // a failed fetch is tried again next time
-      void image.then((bytes) => bytes || this.kept.delete(videoId));
+      void image.then((bytes) => {
+        if (!bytes) setTimeout(() => this.kept.get(videoId) === image && this.kept.delete(videoId), RETRY_AFTER_MS).unref?.();
+      });
     }
     return image;
   }
 
   handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const videoId = /\/thumb\/([\w-]{11})\.jpg$/.exec(new URL(req.url ?? "/", "http://x").pathname)?.[1];
+    const match = /\/thumb\/([0-9a-f]{32})\/([\w-]{11})\.jpg$/.exec(new URL(req.url ?? "/", "http://x").pathname);
+    const videoId = match?.[1] === this.key ? match[2] : undefined;
     const bytes = videoId && this.allowed.has(videoId) ? await this.image(videoId) : null;
     if (!bytes) {
       res.writeHead(404, { "Cache-Control": "no-store" }).end();

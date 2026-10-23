@@ -25,8 +25,8 @@ let view: TView = { channelId: undefined, player: null, canModerate: false, rece
 const listeners = new Set<() => void>();
 let started = false;
 let failureTimer: ReturnType<typeof setTimeout> | undefined;
-/** answers to older requests must not overwrite newer state */
-let generation = 0;
+/** actions on their way */
+let pending = 0;
 
 const host = () => window.__SHARKORD_STORE__;
 
@@ -35,14 +35,16 @@ const set = (next: Partial<TView>) => {
   for (const listener of listeners) listener();
 };
 
+/** for this channel, and not older than what is shown: pushes and answers can cross */
+const current = (player: TPlayer) => player.channelId === view.channelId && player.rev >= (view.player?.rev ?? -1);
+
 const takePlayer = (player: TPlayer) => {
-  if (player.channelId === view.channelId) set({ player, receivedAt: performance.now() });
+  if (current(player)) set({ player, receivedAt: performance.now() });
 };
 
 const takeViewer = (viewer: TViewer | null) => {
-  if (viewer && viewer.player.channelId === view.channelId) {
-    set({ player: viewer.player, canModerate: viewer.canModerate, receivedAt: performance.now() });
-  }
+  if (!viewer || viewer.player.channelId !== view.channelId) return;
+  set(current(viewer.player) ? { player: viewer.player, canModerate: viewer.canModerate, receivedAt: performance.now() } : { canModerate: viewer.canModerate });
 };
 
 const call = <K extends keyof TActions>(name: K, payload?: TActions[K]["payload"]): Promise<TActions[K]["response"]> =>
@@ -56,10 +58,8 @@ const fail = (error: unknown) => {
 };
 
 export const refresh = async (): Promise<void> => {
-  const asked = ++generation;
   try {
-    const viewer = await call("state");
-    if (asked === generation) takeViewer(viewer);
+    takeViewer(await call("state"));
   } catch {
     // the next push or channel change tries again
   }
@@ -68,7 +68,6 @@ export const refresh = async (): Promise<void> => {
 const follow = () => {
   const channelId = host().getState().currentVoiceChannelId;
   if (channelId === view.channelId) return;
-  generation++;
   set({ channelId, player: null, canModerate: false, failure: null });
   if (channelId !== undefined) void refresh();
 };
@@ -90,7 +89,7 @@ export const subscribe = (listener: () => void): (() => void) => {
 export const getView = (): TView => view;
 
 const run = async (send: () => Promise<TViewer>): Promise<boolean> => {
-  set({ busy: true });
+  set({ busy: ++pending > 0 });
   try {
     takeViewer(await send());
     clearTimeout(failureTimer);
@@ -100,7 +99,7 @@ const run = async (send: () => Promise<TViewer>): Promise<boolean> => {
     fail(error);
     return false;
   } finally {
-    set({ busy: false });
+    set({ busy: --pending > 0 });
   }
 };
 
@@ -119,7 +118,7 @@ export const positionOf = (current: TView, now = performance.now()): number => {
 /** for tests */
 export const reset = (): void => {
   started = false;
-  generation = 0;
+  pending = 0;
   clearTimeout(failureTimer);
   listeners.clear();
   view = { channelId: undefined, player: null, canModerate: false, receivedAt: 0, busy: false, failure: null };

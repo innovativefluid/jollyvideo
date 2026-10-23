@@ -130,6 +130,8 @@ export class Toolbox {
    * time; a failing tool does not stop the other.
    */
   ensure = (options: { refreshYtDlp?: boolean } = {}): Promise<void> => {
+    // a refresh asked for during another run happens after it
+    if (this.running && options.refreshYtDlp) return this.running.catch(() => {}).then(() => this.ensure(options));
     this.running ??= (async () => {
       await mkdir(this.binDir, { recursive: true });
       const failures: string[] = [];

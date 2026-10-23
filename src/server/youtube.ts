@@ -3,10 +3,11 @@
  * searches only, looked up and downloaded with yt-dlp.
  */
 import { existsSync } from "fs";
+import { chmod, copyFile, rm } from "fs/promises";
 import path from "path";
 import { MAX_QUERY_LENGTH } from "../contract";
 import { UserError } from "./errors";
-import { run, type TRunOptions } from "./proc";
+import { limiter, run, type TRunOptions } from "./proc";
 import type { TQuality } from "./settings";
 
 export type TSource =
@@ -37,6 +38,8 @@ export type TYtDlp = {
   path: string;
   ffmpeg?: string;
   cookies?: string;
+  /** where each run gets its own copy of the cookies */
+  scratch: string;
   jsRuntime: { args: string[]; env: Record<string, string | undefined> };
 };
 
@@ -97,14 +100,11 @@ export const sourceArg = (source: TSource): string => {
   return `ytsearch1:${source.text}`;
 };
 
-/** options every yt-dlp call shares: nothing from a config file, one video, our runtime and cookies */
-export const commonArgs = (tools: TYtDlp): string[] => [
-  "--ignore-config",
-  "--no-playlist",
-  "--no-warnings",
-  ...tools.jsRuntime.args,
-  ...(tools.cookies ? ["--cookies", tools.cookies] : []),
-];
+/** options every yt-dlp call shares: nothing from a config file, one video, our JavaScript runtime */
+export const commonArgs = (tools: TYtDlp): string[] => ["--ignore-config", "--no-playlist", "--no-warnings", ...tools.jsRuntime.args];
+
+/** lookups across the whole server; each one is a yt-dlp with a JavaScript runtime */
+const LOOKUPS_AT_ONCE = 2;
 
 /** turns yt-dlp's last error into something worth showing */
 export const describeFailure = (stderr: string): string => {
@@ -222,9 +222,25 @@ export type TYouTube = {
 };
 
 export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown[]): void }): TYouTube => {
-  const exec = (args: string[], options: TRunOptions) => {
+  const lookups = limiter(LOOKUPS_AT_ONCE);
+
+  /**
+   * yt-dlp writes its cookies file back when it exits; runs at the same time,
+   * or one killed halfway, would garble the admin's file. Each run gets a copy.
+   */
+  const exec = async (args: string[], options: TRunOptions) => {
     const ytDlp = tools();
-    return run([ytDlp.path, ...commonArgs(ytDlp), ...args], { ...options, env: ytDlp.jsRuntime.env });
+    const cookies = ytDlp.cookies ? path.join(ytDlp.scratch, `cookies-${crypto.randomUUID()}.txt`) : undefined;
+    try {
+      if (cookies) {
+        await copyFile(ytDlp.cookies!, cookies);
+        await chmod(cookies, 0o600);
+      }
+      const cookieArgs = cookies ? ["--cookies", cookies] : [];
+      return await run([ytDlp.path, ...commonArgs(ytDlp), ...cookieArgs, ...args], { ...options, env: ytDlp.jsRuntime.env });
+    } finally {
+      if (cookies) await rm(cookies, { force: true });
+    }
   };
 
   const fail = (stderr: string): never => {
@@ -234,7 +250,7 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
 
   return {
     async resolve(source, q, signal) {
-      const result = await exec(["--no-progress", "-j", "--", sourceArg(source)], { signal, timeoutMs: 90_000 });
+      const result = await lookups(() => exec(["--no-progress", "-j", "--", sourceArg(source)], { signal, timeoutMs: 90_000 }), signal);
       if (result.code !== 0 && !result.stdout.startsWith("{")) fail(result.stderr);
       return parseInfo(result.stdout, source, q);
     },

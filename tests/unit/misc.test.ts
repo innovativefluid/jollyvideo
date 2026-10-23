@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { formatTime } from "../../src/client/format";
 import { boxWidth, encoderArgs, h264Level, type TEncodeOptions } from "../../src/server/encoder";
 import { parseControl } from "../../src/server/index";
+import { closeWhenEmpty } from "../../src/server/players";
 import { QUALITIES, readSettings } from "../../src/server/settings";
 import { Thumbnails } from "../../src/server/thumbnails";
 
@@ -94,24 +95,31 @@ const request = (url: string) => ({ url }) as IncomingMessage;
 describe("thumbnails", () => {
   const jpeg = new Uint8Array([0xff, 0xd8, 1, 2]);
 
-  it("serves only videos someone queued, fetched once", async () => {
+  it("serves only videos someone queued, behind a key, fetched once", async () => {
     const fetched: string[] = [];
     const thumbs = new Thumbnails("/plugins/jollyvideo", console, async (id) => {
       fetched.push(id);
       return jpeg;
     });
-    expect(thumbs.url("dQw4w9WgXcQ")).toBe("/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg");
+    const url = thumbs.url("dQw4w9WgXcQ");
+    expect(url).toMatch(/^\/plugins\/jollyvideo\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\.jpg$/);
+    const key = url.split("/")[4]!;
 
     for (let i = 0; i < 2; i++) {
       const { res, result } = fakeResponse();
-      await thumbs.handle(request("/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg"), res);
+      await thumbs.handle(request(url), res);
       expect(result.status).toBe(200);
       expect(result.headers["Content-Type"]).toBe("image/jpeg");
       expect(result.body).toBe(jpeg);
     }
     expect(fetched).toEqual(["dQw4w9WgXcQ"]);
 
-    for (const url of ["/plugins/jollyvideo/thumb/aaaaaaaaaaa.jpg", "/plugins/jollyvideo/thumb/../x.jpg", "/plugins/jollyvideo/thumb/"]) {
+    for (const url of [
+      `/plugins/jollyvideo/thumb/${key}/aaaaaaaaaaa.jpg`,
+      `/plugins/jollyvideo/thumb/${"0".repeat(32)}/dQw4w9WgXcQ.jpg`,
+      "/plugins/jollyvideo/thumb/dQw4w9WgXcQ.jpg",
+      `/plugins/jollyvideo/thumb/${key}/../x.jpg`,
+    ]) {
       const { res, result } = fakeResponse();
       await thumbs.handle(request(url), res);
       expect(result.status).toBe(404);
@@ -119,23 +127,42 @@ describe("thumbnails", () => {
     expect(fetched).toEqual(["dQw4w9WgXcQ"]);
   });
 
-  it("tries a failed fetch again", async () => {
+  it("does not ask YouTube again right after a failure", async () => {
     let calls = 0;
     const thumbs = new Thumbnails("/p", { error() {} }, async () => (++calls === 1 ? null : jpeg));
-    thumbs.url("dQw4w9WgXcQ");
+    const url = thumbs.url("dQw4w9WgXcQ");
     const first = fakeResponse();
-    await thumbs.handle(request("/p/thumb/dQw4w9WgXcQ.jpg"), first.res);
+    await thumbs.handle(request(url), first.res);
     const second = fakeResponse();
-    await thumbs.handle(request("/p/thumb/dQw4w9WgXcQ.jpg"), second.res);
-    expect([first.result.status, second.result.status]).toEqual([404, 200]);
+    await thumbs.handle(request(url), second.res);
+    expect([first.result.status, second.result.status, calls]).toEqual([404, 404, 1]);
   });
 
   it("forgets the oldest of many", async () => {
     const thumbs = new Thumbnails("/p", console, async () => jpeg);
-    for (let i = 0; i < 201; i++) thumbs.url(`v${String(i).padStart(10, "0")}`);
+    const first = thumbs.url("v0000000000");
+    for (let i = 1; i < 201; i++) thumbs.url(`v${String(i).padStart(10, "0")}`);
     const { res, result } = fakeResponse();
-    await thumbs.handle(request("/p/thumb/v0000000000.jpg"), res);
+    await thumbs.handle(request(first), res);
     expect(result.status).toBe(404);
+  });
+});
+
+describe("closeWhenEmpty", () => {
+  it("closes a player once its channel stayed empty, unless someone came back", async () => {
+    const people = new Map([[1, 0], [2, 0]]);
+    const closed: number[] = [];
+    const empty = closeWhenEmpty({ isEmpty: (id) => people.get(id) === 0, hasPlayer: (id) => id !== 3, close: (id) => closed.push(id), delayMs: 20 });
+    empty.left(1);
+    empty.left(2);
+    empty.left(3);
+    empty.joined(2);
+    people.set(2, 1);
+    await Bun.sleep(50);
+    expect(closed).toEqual([1]);
+    empty.left(2);
+    expect(closed).toEqual([1]);
+    empty.stop();
   });
 });
 

@@ -5,7 +5,7 @@
  * JOLLYVIDEO_YT_DLP, or one on PATH.
  */
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { QUALITIES } from "../../src/server/settings";
@@ -14,6 +14,7 @@ import { script } from "../helpers/fake-host";
 
 const ytDlp = process.env.JOLLYVIDEO_YT_DLP ?? Bun.which("yt-dlp");
 const dir = mkdtempSync(path.join(os.tmpdir(), "jv-ytdlp-"));
+writeFileSync(path.join(dir, "cookies.txt"), "# Netscape HTTP Cookie File\n");
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe.skipIf(!ytDlp)("yt-dlp", () => {
@@ -31,7 +32,7 @@ echo $? > "${dir}/code.txt"
 exit 0`,
   );
   const youtube = createYouTube(
-    () => ({ path: wrapper, ffmpeg: "/usr/bin/ffmpeg", cookies: path.join(dir, "cookies.txt"), jsRuntime: { args: ["--js-runtimes", `bun:${process.execPath}`], env: process.env } }),
+    () => ({ path: wrapper, ffmpeg: "/usr/bin/ffmpeg", cookies: path.join(dir, "cookies.txt"), scratch: dir, jsRuntime: { args: ["--js-runtimes", `bun:${process.execPath}`], env: process.env } }),
     { error() {} },
   );
   const accepted = () => ({ code: readFileSync(path.join(dir, "code.txt"), "utf-8").trim(), output: readFileSync(path.join(dir, "out.txt"), "utf-8") });
@@ -58,5 +59,7 @@ exit 0`,
     const { code, output } = accepted();
     expect(output).not.toContain("Usage:");
     expect(code).toBe("1");
+    // each run used its own copy of the cookies, and removed it
+    expect(readdirSync(dir).filter((name) => name.startsWith("cookies-"))).toEqual([]);
   });
 });
