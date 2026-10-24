@@ -27,8 +27,6 @@ export type TPlayerDeps = {
   createOutput(channelId: number): TOutput;
   encode(options: TEncodeOptions, events: TEncoderEvents): TEncoder;
   thumbnail(videoId: string): string;
-  /** a private channel: Sharkord shows every stream's title to the whole server, so its videos stay unnamed there */
-  channelPrivate(): Promise<boolean>;
   /** whether one more video may start playing on the server */
   slotFree(): boolean;
   /** this player stopped holding a slot, so a waiting one may start */
@@ -142,7 +140,6 @@ export class ChannelPlayer {
   /** the video waiting out PREFETCH_DELAY_MS before it downloads ahead */
   private prefetchFor: TItem | null = null;
   private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
-  private titleHidden = true;
 
   constructor(
     readonly channelId: number,
@@ -624,7 +621,6 @@ export class ChannelPlayer {
     this.changed();
     try {
       const video = await this.resolve(item, true);
-      this.titleHidden = await this.deps.channelPrivate().catch(() => true);
       if (this.current !== current) return;
       current.base = video.start;
       this.output?.relabel(this.label(video));
@@ -637,8 +633,7 @@ export class ChannelPlayer {
   }
 
   private label(video: TResolved) {
-    // an empty banner, not none: Sharkord keeps the old one when it is left out
-    return this.titleHidden ? { title: "Jollyvideo", bannerUrl: "" } : { title: video.title, bannerUrl: this.deps.thumbnail(video.videoId) };
+    return { title: video.title, bannerUrl: this.deps.thumbnail(video.videoId) };
   }
 
   /** whether there is enough to play from `position`: the playlist of a livestream, or the download */

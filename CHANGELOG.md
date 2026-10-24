@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- The stream shows the video's title and thumbnail again, in private voice channels too.
+
 ## 0.3.1
 
 A performance and security pass.

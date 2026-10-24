@@ -132,7 +132,6 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
         createOutput: (id) => createOutput(ctx.voice, id, `${ctx.pluginId}:${id}`),
         encode: startEncoder,
         thumbnail: (videoId) => thumbnails.url(channelId, videoId),
-        channelPrivate: async () => (await ctx.channels.get(channelId))?.private ?? true,
         slotFree: () => players.busyCount() < settings().maxStreams,
         slotFreed: () => players.slotFreed(),
         changed: (player) => players.changed(player),

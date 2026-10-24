@@ -66,7 +66,7 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-type TSetup = { settings?: Partial<TSettings>; playlists?: Record<string, TPlaylistEntry[]>; prefetchDelayMs?: number; private?: boolean };
+type TSetup = { settings?: Partial<TSettings>; playlists?: Record<string, TPlaylistEntry[]>; prefetchDelayMs?: number };
 
 const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) => {
   const cacheDir = mkdtempSync(path.join(os.tmpdir(), "jv-player-"));
@@ -165,7 +165,6 @@ const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) 
       };
     },
     thumbnail: (videoId) => `/thumb/${videoId}.jpg`,
-    channelPrivate: async () => options.private ?? false,
     prefetchDelayMs: options.prefetchDelayMs ?? 0,
     slotFree: () => slots,
     slotFreed: () => freed++,
@@ -636,14 +635,12 @@ describe("ChannelPlayer", () => {
     expect(t.player.snapshot().error).toEqual({ key: "error.unknownLength" });
   });
 
-  it("names the video on the stream only in a channel everyone can see", async () => {
-    for (const hidden of [false, true]) {
-      const t = setup({ a: vod("a") }, { private: hidden });
-      t.player.add("a", 1);
-      await t.downloaded("a");
-      t.encoders[0]!.start();
-      expect(t.published).toEqual([hidden ? { title: "Jollyvideo", bannerUrl: "" } : { title: "Video a", bannerUrl: "/thumb/axxxxxxxxxx.jpg" }]);
-    }
+  it("names the stream after the video, with its thumbnail", async () => {
+    const t = setup({ a: vod("a") });
+    t.player.add("a", 1);
+    await t.downloaded("a");
+    t.encoders[0]!.start();
+    expect(t.published).toEqual([{ title: "Video a", bannerUrl: "/thumb/axxxxxxxxxx.jpg" }]);
   });
 
   it("keeps the state it pushes small", () => {
