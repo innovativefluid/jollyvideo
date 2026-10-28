@@ -5,7 +5,7 @@
 import { existsSync } from "fs";
 import { chmod, copyFile, mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
-import { MAX_QUERY_LENGTH, MAX_QUEUE } from "../contract";
+import { MAX_QUERY_LENGTH, MAX_QUEUE, type TCaptionTrack, type TCue } from "../contract";
 import type { TMessageKey } from "../i18n";
 import { UserError } from "./errors";
 import { limiter, run, type TRunOptions } from "./proc";
@@ -44,6 +44,8 @@ export type TResolved = {
   hls?: { url: string; headers: Record<string, string> };
   /** the lookup's info JSON on disk, so the downloads need not look the video up again */
   info?: string;
+  /** caption languages: the uploader's, then YouTube's automatic ones in the video's language */
+  captions: TCaptionTrack[];
 };
 
 export type TLookupOptions = {
@@ -266,6 +268,61 @@ type TInfo = {
   is_live?: unknown;
   formats?: unknown;
   entries?: unknown;
+  language?: unknown;
+  subtitles?: unknown;
+  automatic_captions?: unknown;
+};
+
+const MAX_TRACKS = 30;
+export const CAPTION_ID = /^[\w-]{1,32}$/;
+
+/** the tracks of a captions map that come as json3, which is what is downloaded */
+const tracksOf = (value: unknown): [string, { name?: unknown }][] =>
+  value && typeof value === "object"
+    ? Object.entries(value as Record<string, unknown>).flatMap(([id, formats]) => {
+        if (!CAPTION_ID.test(id) || id === "live_chat" || !Array.isArray(formats)) return [];
+        const json3 = (formats as { ext?: unknown; name?: unknown }[]).find((format) => format?.ext === "json3");
+        return json3 ? [[id, json3] as [string, { name?: unknown }]] : [];
+      })
+    : [];
+
+/**
+ * The uploader's captions, and YouTube's automatic ones in the video's own
+ * language only: it offers machine translations into some hundred more.
+ */
+export const parseCaptionTracks = (info: TInfo): TCaptionTrack[] => {
+  const label = (id: string, name: unknown) => titleOf(name, id).slice(0, 60);
+  const own = tracksOf(info.subtitles).map(([id, format]): TCaptionTrack => ({ id, label: label(id, format.name), auto: false }));
+  const language = typeof info.language === "string" ? info.language : "";
+  const automatic = new Map(tracksOf(info.automatic_captions));
+  const autoId = [`${language}-orig`, language].find((id) => id && id !== "-orig" && automatic.has(id));
+  const auto = autoId ? [{ id: autoId, label: label(autoId, automatic.get(autoId)!.name), auto: true }] : [];
+  return [...own.slice(0, MAX_TRACKS - auto.length), ...auto];
+};
+
+const MAX_CUES = 20_000;
+const MAX_CUE_TEXT = 300;
+
+/** YouTube's json3 captions as lines; lines that only make room for the next are dropped */
+export const parseCaptions = (text: string): TCue[] => {
+  const events = (JSON.parse(text) as { events?: unknown }).events;
+  if (!Array.isArray(events)) return [];
+  const cues: TCue[] = [];
+  for (const event of events as { tStartMs?: unknown; dDurationMs?: unknown; segs?: unknown }[]) {
+    if (cues.length >= MAX_CUES) break;
+    const start = Number(event?.tStartMs);
+    const duration = Number(event?.dDurationMs);
+    if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Array.isArray(event.segs)) continue;
+    const line = (event.segs as { utf8?: unknown }[])
+      .map((seg) => (typeof seg?.utf8 === "string" ? seg.utf8 : ""))
+      .join("")
+      .replace(CONTROL, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, MAX_CUE_TEXT);
+    if (line) cues.push([start, start + duration, line]);
+  }
+  return cues.sort((a, b) => a[0] - b[0]);
 };
 
 const titleOf = (value: unknown, fallback: string) => {
@@ -288,11 +345,11 @@ export const parseInfo = (stdout: string, source: TSource, q: TQuality): TResolv
   if (live) {
     const hls = pickLive(formats, q);
     if (!hls?.url?.startsWith("https://")) throw new UserError("yt.liveFailed");
-    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} } };
+    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} }, captions: [] };
   }
   const duration = secondsOf(info.duration);
   const start = source.kind === "video" && source.start < duration ? source.start : 0;
-  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q) };
+  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q), captions: parseCaptionTracks(info) };
 };
 
 /** a flat playlist: what can be played, without the private and deleted ones */
@@ -317,7 +374,12 @@ export type TYouTube = {
   downloadPart(video: TResolved, part: TPart, file: string, onProgress: TProgress, signal: AbortSignal): Promise<void>;
   /** the whole video, merged into one file in `dir`, for videos without separate formats */
   downloadMerged(video: TResolved, dir: string, onProgress: TProgress, signal: AbortSignal): Promise<string>;
+  /** one caption track of the video, downloaded into `dir` and read */
+  captions(video: TResolved, track: TCaptionTrack, dir: string, signal: AbortSignal): Promise<TCue[]>;
 };
+
+/** a captions file larger than this is not read */
+const MAX_CAPTIONS_BYTES = 8 * 1024 * 1024;
 
 /**
  * A file name for `-o`, which is a template: % is escaped. Downloads run in
@@ -415,6 +477,31 @@ export const createYouTube = (tools: () => TYtDlp, log: { error(...args: unknown
       );
       if (result.code !== 0) fail(result.stderr);
       if (!existsSync(file)) throw new UserError("yt.tooLarge");
+    },
+
+    async captions(video, track, dir, signal) {
+      const result = await lookups(
+        () =>
+          exec(
+            [
+              "--no-playlist",
+              "--skip-download",
+              track.auto ? "--write-auto-subs" : "--write-subs",
+              "--sub-langs", track.id,
+              "--sub-format", "json3",
+              "-o", "captions",
+              ...videoArgs(video, dir),
+            ],
+            { signal, timeoutMs: 90_000, cwd: dir },
+          ),
+        signal,
+        true,
+      );
+      const file = Bun.file(path.join(dir, `captions.${track.id}.json3`));
+      if (result.code !== 0) fail(result.stderr);
+      if (!(await file.exists())) throw new UserError("error.captions");
+      if (file.size > MAX_CAPTIONS_BYTES) throw new UserError("error.captions");
+      return parseCaptions(await file.text());
     },
 
     async downloadMerged(video, dir, onProgress, signal) {

@@ -139,6 +139,8 @@ export const script = (dir: string, name: string, body: string): string => {
  *   format, `$JV_FIXTURE_AUDIO` for an audio one, or a placeholder. With
  *   `$JV_RATE` (bytes per second) the file grows at that rate, like a real
  *   download.
+ * - `--skip-download` writes captions: `<-o>.<lang>.json3` with a line every
+ *   few seconds saying the language and the time.
  * - an `-o` with a template merges: `$JV_FIXTURE` (or a placeholder) into
  *   `video.mkv`, and prints its path.
  *
@@ -166,6 +168,12 @@ if (args.includes("-j") || args.includes("-J")) {
   process.exit(0);
 }
 const out = value("-o");
+if (args.includes("--skip-download")) {
+  const lang = value("--sub-langs");
+  const events = Array.from({ length: 200 }, (_, i) => ({ tStartMs: i * 3000, dDurationMs: 2500, segs: [{ utf8: lang + " line " + i }] }));
+  writeFileSync(out + "." + lang + ".json3", JSON.stringify({ events }));
+  process.exit(0);
+}
 const format = info.formats?.find((f) => f.format_id === value("-f")?.split("/")[0]);
 if (!out.includes("%(")) {
   const source = format?.vcodec && format.vcodec !== "none" ? process.env.JV_FIXTURE_VIDEO : process.env.JV_FIXTURE_AUDIO;

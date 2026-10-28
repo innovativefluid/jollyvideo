@@ -12,7 +12,7 @@ import { closeWhenEmpty, fitted, Players } from "./players";
 import { readSettings, SETTINGS } from "./settings";
 import { Thumbnails } from "./thumbnails";
 import { Toolbox } from "./tools";
-import { createYouTube } from "./youtube";
+import { CAPTION_ID, createYouTube } from "./youtube";
 
 const IN_VOICE = "JOIN_VOICE_CHANNELS" as Permission;
 /** moderators lock the player, and still control it while it is locked */
@@ -279,6 +279,21 @@ export const onLoad = async (ctx: PluginContext<TJollyvideo>): Promise<void> => 
     name: "control",
     requires: IN_VOICE,
     executes: guarded("control", async (invoker, payload) => viewer(invoker, await control(invoker, parseControl(payload)))),
+  });
+
+  // anyone in the channel reads captions, locked or not: they only change that viewer's panel
+  ctx.actions.register({
+    name: "captions",
+    requires: IN_VOICE,
+    executes: guarded("captions", async (invoker, payload) => {
+      const p = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+      if (typeof p.id !== "string" || p.id.length > 64 || typeof p.track !== "string" || !CAPTION_ID.test(p.track) || typeof p.from !== "number" || !Number.isFinite(p.from) || p.from < 0) {
+        throw new UserError("error.captions");
+      }
+      const player = players.get(voiceChannel(invoker));
+      if (!player) throw new UserError("error.nothingPlaying");
+      return player.captions(p.id, p.track, p.from);
+    }),
   });
 
   ctx.commands.register({

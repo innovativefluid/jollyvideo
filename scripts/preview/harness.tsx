@@ -31,6 +31,10 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   duration: 634,
   live: false,
   thumbnail: thumbnail(200),
+  captions: [
+    { id: "en", label: "English", auto: false },
+    { id: "de", label: "German", auto: false },
+  ],
   state: "playing",
   position: 127,
   progress: null,
@@ -75,7 +79,7 @@ const control = (op: TControl) => {
   if (op.op === "stop") Object.assign(player, { now: null, queue: [] });
   if (op.op === "skip") {
     const [next, ...rest] = player.queue;
-    player.now = next ? { ...next, thumbnail: "", state: "playing", position: 0 } : null;
+    player.now = next ? { ...next, thumbnail: "", captions: [], state: "playing", position: 0 } : null;
     player.queue = rest;
   }
   update(player);
@@ -87,6 +91,13 @@ globals.__SHARKORD_STORE__ = {
   actions: {
     async executePluginAction(_plugin: string, name: string, payload: unknown) {
       await new Promise((resolve) => setTimeout(resolve, 150));
+      if (name === "captions") {
+        // a line every four seconds, the way an uploader's captions come
+        const { track, from } = payload as { track: string; from: number };
+        const words = track === "de" ? "Die Geschichte eines großen Hasen" : "The story of a big bunny and three bullies";
+        const cues = Array.from({ length: 75 }, (_, i) => [(from + i * 4) * 1000, (from + i * 4 + 3.5) * 1000, `${words} (${from + i * 4} s)`]);
+        return { cues, from, until: from + 300 };
+      }
       if (name === "add") {
         const query = (payload as { query: string }).query;
         const entry: TQueueEntry = { id: crypto.randomUUID(), title: query, duration: 0, live: false, state: "resolving", progress: null };

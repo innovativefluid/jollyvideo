@@ -1,8 +1,9 @@
 /** The popover: add a video, control the one playing, see what is next. */
-import { Lock, LockOpen, LoaderCircle, Pause, Play, Plus, SkipForward, Square } from "lucide-react";
+import { Captions, Lock, LockOpen, LoaderCircle, Pause, Play, Plus, SkipForward, Square } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { MAX_QUERY_LENGTH, type TControl, type TNowPlaying } from "../contract";
+import { captionsAt, choose, firstTrack, useCaptionStore, type TCaptionView } from "./captions";
 import { cls } from "./classes";
 import { formatTime } from "./format";
 import { Queue } from "./queue";
@@ -15,14 +16,14 @@ const GAP = 8;
 
 const useView = () => useSyncExternalStore(subscribe, getView);
 
-/** re-renders every second while `active`, so the position moves */
-const useTicking = (active: boolean) => {
+/** re-renders every `ms` while `active`, so the position moves */
+const useTicking = (active: boolean, ms: number) => {
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;
-    const timer = setInterval(() => setTick((tick) => tick + 1), 1000);
+    const timer = setInterval(() => setTick((tick) => tick + 1), ms);
     return () => clearInterval(timer);
-  }, [active]);
+  }, [active, ms]);
 };
 
 type TPlace = { side: "top" | "bottom"; left: number; width: number; top?: number; bottom?: number; maxHeight: number };
@@ -113,7 +114,48 @@ const Thumbnail = ({ src }: { src: string }) => {
   return src && failed !== src ? <img src={src} alt="" className={cls.thumbnail} onError={() => setFailed(src)} /> : <div className={cls.thumbnail} />;
 };
 
-const NowPlaying = ({ now, position, canControl }: { now: TNowPlaying; position: number; canControl: boolean }) => (
+/** this viewer's captions on or off */
+const CaptionsButton = ({ captions }: { captions: TCaptionView }) => {
+  if (!captions.tracks.length) return null;
+  const on = captions.track !== null;
+  const toggle = () => choose(on ? null : (firstTrack(captions.tracks, navigator.languages ?? [navigator.language])?.id ?? null));
+  return (
+    <button type="button" className={on ? cls.iconButtonOn : cls.iconButton} title={t("ui.captions")} aria-label={t("ui.captions")} aria-pressed={on} onClick={toggle}>
+      <Captions />
+    </button>
+  );
+};
+
+/** the current lines, and the language when there are several */
+const CaptionLines = ({ captions }: { captions: TCaptionView }) => {
+  if (!captions.track) return null;
+  return (
+    <>
+      <p className={captions.failed ? cls.captionsFailed : cls.captions} aria-live="polite">
+        {captions.failed
+          ? t("error.captions")
+          : (captions.lines.length ? captions.lines : ["\u00a0"]).map((line, index) => (
+              <span key={index} className={cls.captionLine}>
+                {line}
+              </span>
+            ))}
+      </p>
+      {captions.tracks.length > 1 && (
+        <div className={cls.queueFooter}>
+          <select className={cls.select} aria-label={t("ui.captionsLanguage")} value={captions.track.id} onChange={(event) => choose(event.target.value)}>
+            {captions.tracks.map((track) => (
+              <option key={track.id} value={track.id}>
+                {track.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+    </>
+  );
+};
+
+const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying; position: number; canControl: boolean; captions: TCaptionView }) => (
   <>
     <div className={cls.nowPlaying}>
       <Thumbnail src={now.thumbnail} />
@@ -149,9 +191,11 @@ const NowPlaying = ({ now, position, canControl }: { now: TNowPlaying; position:
       <IconButton label={t("ui.stop")} disabled={!canControl} onClick={() => send({ op: "stop" })}>
         <Square />
       </IconButton>
+      <CaptionsButton captions={captions} />
       <span className={cls.grow} />
       <Status now={now} position={position} />
     </div>
+    <CaptionLines captions={captions} />
   </>
 );
 
@@ -212,7 +256,11 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
   const locked = player?.locked ?? false;
   const canControl = !locked || view.canModerate;
   const now = player?.now ?? null;
-  useTicking(now?.state === "playing");
+  useCaptionStore();
+  const position = positionOf(view);
+  const captions = captionsAt(now, position);
+  // captions change more often than the clock
+  useTicking(now?.state === "playing", captions.track ? 250 : 1000);
   const error = view.failure ?? player?.error ?? null;
 
   return createPortal(
@@ -226,7 +274,7 @@ export const Panel = ({ anchor, onClose }: { anchor: RefObject<HTMLElement | nul
       style={{ left: where.left, width: where.width, top: where.top, bottom: where.bottom, maxHeight: where.maxHeight }}
     >
       <AddRow canControl={canControl} canModerate={view.canModerate} locked={locked} busy={view.busy} />
-      {now && <NowPlaying now={now} position={positionOf(view)} canControl={canControl} />}
+      {now && <NowPlaying now={now} position={position} canControl={canControl} captions={captions} />}
       {player && player.queue.length > 0 && <Queue queue={player.queue} canControl={canControl} send={send} />}
       {error && (
         <p className={cls.error} role="alert">

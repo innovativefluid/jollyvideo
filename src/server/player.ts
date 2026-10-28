@@ -6,7 +6,7 @@
  */
 import { mkdir, rm } from "fs/promises";
 import path from "path";
-import { MAX_QUEUE, type TPlayer, type TQueueEntry } from "../contract";
+import { CAPTION_WINDOW, MAX_QUEUE, type TCaptions, type TCue, type TPlayer, type TQueueEntry } from "../contract";
 import type { TMessage } from "../i18n";
 import type { TEncodeOptions, TEncoder, TEncoderEvents, TExit } from "./encoder";
 import { h264Level } from "./encoder";
@@ -52,6 +52,8 @@ type TItem = {
   lookedUpAt: number;
   /** its lookup is wanted now, so it goes ahead of other lookups even if it was asked for earlier */
   urgent: boolean;
+  /** caption tracks read so far, by track id */
+  captions: Map<string, Promise<TCue[]>>;
   resolving: Promise<TResolved> | null;
   fetching: TFetch | null;
   /** separate video and audio, readable while they grow; or one merged file, readable when done */
@@ -257,6 +259,40 @@ export class ChannelPlayer {
     this.changed();
   }
 
+  /**
+   * The playing video's captions in one language, the lines between `from`
+   * and CAPTION_WINDOW seconds later. Each track is downloaded once per video.
+   */
+  async captions(entryId: string, trackId: string, from: number): Promise<TCaptions> {
+    const item = this.current?.item;
+    if (!item || item.id !== entryId) throw new UserError("error.nothingPlaying");
+    const track = item.video?.captions.find((candidate) => candidate.id === trackId);
+    if (!track) throw new UserError("error.captions");
+    let cues = item.captions.get(track.id);
+    if (!cues) {
+      const video = item.video!;
+      cues = (async () => {
+        const dir = path.join(this.deps.cacheDir, item.id, "captions");
+        await mkdir(dir, { recursive: true });
+        return this.deps.youtube.captions(video, track, dir, item.abort.signal);
+      })();
+      item.captions.set(track.id, cues);
+      // a failure is not tried again for this video, but is logged once
+      cues.catch((error) => {
+        if (!(error instanceof UserError) && !item.abort.signal.aborted) this.deps.log.error(`[captions ${this.channelId}]`, errorText(error));
+      });
+    }
+    let all: TCue[];
+    try {
+      all = await cues;
+    } catch (error) {
+      throw error instanceof UserError ? error : new UserError("error.captions");
+    }
+    const start = Math.max(0, Math.floor(from));
+    const until = start + CAPTION_WINDOW;
+    return { cues: all.filter(([begin, end]) => end > start * 1000 && begin < until * 1000), from: start, until };
+  }
+
   /** starts the queue again after it waited for a free slot */
   retry(): void {
     if (!this.current && this.queue.length && !this.destroyed) this.background(this.advance());
@@ -296,6 +332,7 @@ export class ChannelPlayer {
     const now = current && {
       ...entry(current.item),
       thumbnail: current.item.video ? this.deps.thumbnail(current.item.video.videoId) : "",
+      captions: current.item.video?.captions ?? [],
       state: current.state,
       position: Math.floor(this.position(current)),
     };
@@ -315,7 +352,7 @@ export class ChannelPlayer {
   // -- inside ---------------------------------------------------------------
 
   private item(source: TSource, addedBy: number, hint: TItem["hint"]): TItem {
-    return { id: crypto.randomUUID(), source, addedBy, hint, video: null, lookedUpAt: 0, urgent: false, resolving: null, fetching: null, downloads: null, abort: new AbortController() };
+    return { id: crypto.randomUUID(), source, addedBy, hint, video: null, lookedUpAt: 0, urgent: false, captions: new Map(), resolving: null, fetching: null, downloads: null, abort: new AbortController() };
   }
 
   private assertAlive() {

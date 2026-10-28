@@ -54,6 +54,10 @@ test('watches a video together in a voice channel', async ({ page }) => {
   await expect(panel.getByRole('paragraph')).toHaveText('Sunset over the bay');
   await expectFrames(page);
 
+  // captions, for this viewer: the line for where the video is
+  await panel.getByRole('button', { name: 'Captions' }).click();
+  await expect(panel.getByText(/^en line \d+$/)).toBeVisible({ timeout: 15_000 });
+
   // two more in the queue, the next one downloaded
   await add('harbor');
   await add('night');

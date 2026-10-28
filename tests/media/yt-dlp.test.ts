@@ -52,6 +52,7 @@ exit 0`,
     },
     format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
     fps: 30,
+    captions: [{ id: "en", label: "English", auto: false }],
   };
   const parsed = () => {
     const { code, output } = accepted();
@@ -89,6 +90,13 @@ exit 0`,
     parsed();
     // each run used its own copy of the cookies, and removed it
     expect(readdirSync(dir).filter((name) => /^[0-9a-f-]{36}$/.test(name))).toEqual([]);
+  });
+
+  it("accepts the arguments of a captions download", async () => {
+    const captionsDir = path.join(dir, "captions");
+    mkdirSync(captionsDir, { recursive: true });
+    await youtube.captions(video, video.captions[0]!, captionsDir, new AbortController().signal).catch(() => {});
+    parsed();
   });
 
   it("accepts the arguments of a playlist lookup", async () => {

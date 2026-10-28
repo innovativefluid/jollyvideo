@@ -43,6 +43,7 @@ const ytDlp = fakeYtDlp(work, {
   title: "Sunset over the bay",
   duration: 120,
   // more videos for the queue, from the same files
+  subtitles: { en: [{ ext: "json3", url: "https://www.youtube.com/api/timedtext", name: "English" }] },
   byQuery: { harbor: { id: "jvDemo00002", title: "Harbor lights" }, night: { id: "jvDemo00003", title: "Night drive" } },
   formats: [
     { format_id: "v", ext: "mp4", vcodec: "avc1.64001f", acodec: "none", height: 720, fps: 30, protocol: "https", filesize: Bun.file(video).size },

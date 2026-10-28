@@ -16,7 +16,7 @@ On first start the server downloads yt-dlp and ffmpeg, checked against their SHA
 
 Join a voice channel and click the popcorn button next to the camera button. Paste a YouTube video, playlist or livestream link, or type a search. A video starts once its first 20 seconds have downloaded.
 
-Drag queued videos to reorder them. Moderators (*Move members*) can lock the player so only they control it.
+Drag queued videos to reorder them. The captions button shows the video's captions in the panel, for you alone. Moderators (*Move members*) can lock the player so only they control it.
 
 Commands: `/watch`, `/watch-skip`, `/watch-stop`, `/watch-lock`, `/watch-update`.
 

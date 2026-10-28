@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { TControl, TNowPlaying, TPlayer, TQueueEntry, TViewer } from "../../src/contract";
 import { cls } from "../../src/client/classes";
+import { resetCaptions } from "../../src/client/captions";
 import { reset } from "../../src/client/store";
 import { VoiceButton } from "../../src/client/voice-button";
 
@@ -15,6 +16,7 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   duration: 120,
   live: false,
   thumbnail: "/plugins/jollyvideo/thumb/aqz-KE-bpKQ.jpg",
+  captions: [],
   state: "playing",
   position: 10,
   progress: null,
@@ -36,6 +38,12 @@ let calls: TCall[];
 let state: TViewer;
 let failNext: string | null;
 let push: (data: unknown) => void;
+/** the server's captions: a line every 10 seconds naming its language and time; "xx" fails */
+const captionsAnswer = async ({ track, from }: { track: string; from: number }) => {
+  if (track === "xx") throw new Error('jv:{"key":"error.captions"}');
+  const cues = Array.from({ length: 30 }, (_, i) => [(from + i * 10) * 1000, (from + i * 10 + 8) * 1000, `${track} at ${from + i * 10}`]);
+  return { cues, from, until: from + 300 };
+};
 
 const installHost = () => {
   calls = [];
@@ -48,6 +56,7 @@ const installHost = () => {
       executePluginAction: async (pluginId: string, name: string, payload?: unknown) => {
         expect(pluginId).toBe("jollyvideo");
         calls.push({ name, payload });
+        if (name === "captions") return captionsAnswer(payload as { track: string; from: number });
         if (failNext) {
           const message = failNext;
           failNext = null;
@@ -80,9 +89,57 @@ const controls = () => calls.filter((call) => call.name === "control").map((call
 
 beforeEach(() => {
   reset();
+  localStorage.clear();
+  resetCaptions();
   installHost();
 });
 afterEach(() => cleanup());
+
+describe("captions", () => {
+  const tracks = [
+    { id: "en", label: "English", auto: false },
+    { id: "de", label: "Deutsch", auto: false },
+    { id: "xx", label: "Broken", auto: false },
+  ];
+  const captionCalls = () => calls.filter((call) => call.name === "captions").map((call) => call.payload);
+
+  it("are off until this viewer turns them on, then follow the video", async () => {
+    await open();
+    await show({ player: player({ now: now({ captions: tracks, position: 312, duration: 900 }) }), canModerate: false });
+    const button = screen.getByRole("button", { name: "Captions" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(captionCalls()).toEqual([]);
+    await act(async () => fireEvent.click(button));
+    expect(screen.getByRole("button", { name: "Captions" }).getAttribute("aria-pressed")).toBe("true");
+    // the browser speaks English: the English track, the window the position is in
+    expect(captionCalls()).toEqual([{ id: "n1", track: "en", from: 300 }]);
+    expect(await screen.findByText("en at 310")).toBeTruthy();
+    await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Caption language" }), { target: { value: "de" } }));
+    expect(await screen.findByText("de at 310")).toBeTruthy();
+    expect(localStorage.getItem("jollyvideo:captions")).toBe("de");
+  });
+
+  it("fetch the next window shortly before it is needed", async () => {
+    localStorage.setItem("jollyvideo:captions", "en");
+    resetCaptions();
+    await open();
+    await show({ player: player({ now: now({ captions: tracks, position: 285, duration: 900 }) }), canModerate: false });
+    expect(captionCalls()).toEqual([
+      { id: "n1", track: "en", from: 0 },
+      { id: "n1", track: "en", from: 300 },
+    ]);
+  });
+
+  it("say so when they cannot be loaded, and stay off for videos without any", async () => {
+    localStorage.setItem("jollyvideo:captions", "xx");
+    resetCaptions();
+    await open();
+    await show({ player: player({ now: now({ captions: tracks, position: 5 }) }), canModerate: false });
+    expect(await screen.findByText("The captions could not be loaded")).toBeTruthy();
+    await show({ player: player({ now: now({ id: "n2", captions: [], position: 5 }) }), canModerate: false });
+    expect(screen.queryByRole("button", { name: "Captions" })).toBeNull();
+  });
+});
 
 describe("the panel", () => {
   it("opens from the voice controls with just a search field", async () => {

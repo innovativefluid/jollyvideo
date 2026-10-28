@@ -9,7 +9,7 @@ import * as mediasoup from "mediasoup";
 import type { Router, Worker } from "mediasoup/types";
 import os from "os";
 import path from "path";
-import type { TPlayer, TViewer } from "../../src/contract";
+import type { TCaptions, TPlayer, TViewer } from "../../src/contract";
 import { onLoad, onUnload } from "../../src/server/index";
 import { fakeHost, fakeYtDlp, script } from "../helpers/fake-host";
 import { SHARKORD_CODECS } from "../helpers/sharkord";
@@ -43,6 +43,7 @@ beforeAll(async () => {
       { format_id: "136", vcodec: "avc1", acodec: "none", height: 720, fps: 30, protocol: "https" },
       { format_id: "251", vcodec: "none", acodec: "opus", abr: 130, protocol: "https" },
     ],
+    subtitles: { en: [{ ext: "json3", url: "https://www.youtube.com/api/timedtext", name: "English" }] },
   });
   // reports a second of progress, then waits to be stopped
   process.env.JOLLYVIDEO_FFMPEG = script(dir, "ffmpeg", "echo out_time_us=1000000\nexec sleep 60");
@@ -62,7 +63,7 @@ afterAll(async () => {
 
 describe("the server half", () => {
   it("registers its actions, commands, route and button", () => {
-    expect([...host.actions.keys()]).toEqual(["state", "add", "control"]);
+    expect([...host.actions.keys()]).toEqual(["state", "add", "control", "captions"]);
     expect([...host.actions.values()].every((action) => action.requires === "JOIN_VOICE_CHANNELS")).toBe(true);
     expect(Object.fromEntries([...host.commands].map(([name, command]) => [name, command.requires]))).toEqual({
       watch: "JOIN_VOICE_CHANNELS",
@@ -110,6 +111,20 @@ describe("the server half", () => {
     expect(playing.now!.thumbnail).toMatch(/^\/plugins\/jollyvideo\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\.jpg$/);
     expect(host.streams).toHaveLength(1);
     expect(host.streams[0]!.options).toMatchObject({ channelId: CHANNEL, title: "Test video", bannerUrl: playing.now!.thumbnail });
+  });
+
+  it("serves the playing video's captions to whoever is in the channel", async () => {
+    const now = lastPush()!.now!;
+    expect(now.captions).toEqual([{ id: "en", label: "English", auto: false }]);
+    const captions = (await host.action("captions", USER, CHANNEL, { id: now.id, track: "en", from: 30 })) as TCaptions;
+    expect(captions.from).toBe(30);
+    expect(captions.until).toBe(330);
+    expect(captions.cues[0]).toEqual([30000, 32500, "en line 10"]);
+    expect(captions.cues.at(-1)![2]).toBe("en line 109");
+    for (const payload of [{ id: now.id, track: "../x", from: 0 }, { id: now.id, track: "en", from: -1 }, null]) {
+      await expect(host.action("captions", USER, CHANNEL, payload)).rejects.toThrow("error.captions");
+    }
+    await expect(host.action("captions", USER, 99, { id: now.id, track: "en", from: 0 })).rejects.toThrow("error.nothingPlaying");
   });
 
   it("serves no thumbnail it was not asked for", async () => {

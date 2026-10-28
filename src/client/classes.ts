@@ -57,4 +57,9 @@ export const cls = {
   /** where a non-moderator sees that the player is locked */
   lockedMark: "inline-flex size-9 shrink-0 items-center justify-center text-muted-foreground",
   error: "text-sm text-destructive",
+  /** the caption language picker */
+  select: "border-input dark:bg-input/30 h-8 max-w-40 rounded-md border bg-transparent px-2 text-xs outline-none",
+  captions: "rounded-md bg-muted/50 px-2 py-1.5 text-sm text-center break-words",
+  captionsFailed: "rounded-md bg-muted/50 px-2 py-1.5 text-xs text-center text-muted-foreground",
+  captionLine: "block",
 } as const;

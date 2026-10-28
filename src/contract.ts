@@ -21,9 +21,23 @@ export type TQueueEntry = TVideo & {
   playlist?: true;
 };
 
+/** a caption language the video has; `id` is YouTube's language code */
+export type TCaptionTrack = { id: string; label: string; auto: boolean };
+
+/** one caption line: from and to (milliseconds into the video), text */
+export type TCue = [start: number, end: number, text: string];
+
+export type TCaptions = {
+  /** the lines shown between `from` and `until` (seconds), in order */
+  cues: TCue[];
+  from: number;
+  until: number;
+};
+
 export type TNowPlaying = TVideo & {
   /** same-origin path of the cached thumbnail, or "" */
   thumbnail: string;
+  captions: TCaptionTrack[];
   state: "loading" | "playing" | "paused";
   /** seconds into the video when this state was produced */
   position: number;
@@ -61,6 +75,8 @@ export type TJollyvideo = {
     state: { payload: void; response: TViewer | null };
     add: { payload: { query: string }; response: TViewer };
     control: { payload: TControl; response: TViewer };
+    /** the playing video's captions in one language, a window of CAPTION_WINDOW seconds from `from` */
+    captions: { payload: { id: string; track: string; from: number }; response: TCaptions };
   };
   commands: {
     watch: { args: { query: string }; response: string };
@@ -75,3 +91,4 @@ export type TJollyvideo = {
 export const PLUGIN_ID = "jollyvideo";
 export const MAX_QUERY_LENGTH = 500;
 export const MAX_QUEUE = 50;
+export const CAPTION_WINDOW = 300;

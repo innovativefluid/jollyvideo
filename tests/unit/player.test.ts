@@ -44,6 +44,7 @@ const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResol
   parts: PARTS,
   format: "bv*+ba/b",
   fps: 30,
+  captions: [],
   ...extra,
 });
 const live = (id: string): TResolved => ({ ...vod(id, 0), live: true, parts: null, hls: { url: `https://m/${id}.m3u8`, headers: {} } });
@@ -76,6 +77,7 @@ const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) 
   const resolves: string[] = [];
   const urgent: string[] = [];
   const urgency = new Map<string, () => boolean>();
+  const captionDownloads: string[] = [];
   const published: TLabel[] = [];
   const connections: (TConnection & { closed: boolean })[] = [];
   const playlistLookups: { listId: string; signal: AbortSignal; done: ReturnType<typeof deferred<TPlaylistEntry[]>> }[] = [];
@@ -120,6 +122,15 @@ const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) 
       },
       downloadPart: async (video, part, file, progress, signal) => void (await download(video, part, file, progress, signal)),
       downloadMerged: (video, dir, progress, signal) => download(video, null, path.join(dir, "merged.mkv"), progress, signal),
+      async captions(_video, track) {
+        captionDownloads.push(track.id);
+        if (track.id === "xx") throw new Error("HTTP Error 429");
+        return [
+          [1000, 3000, `${track.id} one`],
+          [299_000, 302_000, `${track.id} across`],
+          [400_000, 401_000, `${track.id} later`],
+        ];
+      },
     },
     createOutput: () => ({
       async connect() {
@@ -182,6 +193,7 @@ const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) 
     resolves,
     urgent,
     urgency,
+    captionDownloads,
     published,
     connections,
     errors,
@@ -641,6 +653,28 @@ describe("ChannelPlayer", () => {
     await t.downloaded("a");
     t.encoders[0]!.start();
     expect(t.published).toEqual([{ title: "Video a", bannerUrl: "/thumb/axxxxxxxxxx.jpg" }]);
+  });
+
+  it("serves the playing video's captions in windows, downloading each language once", async () => {
+    const tracks = [
+      { id: "en", label: "English", auto: false },
+      { id: "xx", label: "Broken", auto: false },
+    ];
+    const t = setup({ a: vod("a", 600, { captions: tracks }) });
+    t.player.add("a", 1);
+    await t.downloaded("a");
+    const id = t.player.snapshot().now!.id;
+    expect(t.player.snapshot().now!.captions).toEqual(tracks);
+    expect(await t.player.captions(id, "en", 0)).toEqual({ cues: [[1000, 3000, "en one"], [299_000, 302_000, "en across"]], from: 0, until: 300 });
+    // a line that began before the window still shows in it
+    expect((await t.player.captions(id, "en", 300.7)).cues).toEqual([[299_000, 302_000, "en across"], [400_000, 401_000, "en later"]]);
+    expect(t.captionDownloads).toEqual(["en"]);
+    await expect(t.player.captions(id, "xx", 0)).rejects.toThrow("captions could not be loaded");
+    await expect(t.player.captions(id, "xx", 0)).rejects.toThrow("captions could not be loaded");
+    expect(t.captionDownloads).toEqual(["en", "xx"]);
+    expect(t.errors).toHaveLength(1);
+    await expect(t.player.captions(id, "de", 0)).rejects.toThrow(UserError);
+    await expect(t.player.captions("other", "en", 0)).rejects.toThrow("Nothing is playing");
   });
 
   it("keeps the state it pushes small", () => {

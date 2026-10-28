@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Captions: the Captions button in the panel shows the video's captions under the controls, for you alone, in the language you pick. The uploader's captions come first, then YouTube's automatic ones in the video's language.
+
 ## 0.3.2
 
 - The stream shows the video's title and thumbnail again, in private voice channels too.

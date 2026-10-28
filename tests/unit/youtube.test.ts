@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { UserError } from "../../src/server/errors";
 import { QUALITIES } from "../../src/server/settings";
-import { commonArgs, createYouTube, describeFailure, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
+import { commonArgs, createYouTube, describeFailure, parseCaptions, parseCaptionTracks, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
 
 import { script } from "../helpers/fake-host";
 
@@ -270,5 +270,45 @@ echo '{"id":"dQw4w9WgXcQ","title":"t","duration":1,"formats":[]}'`,
     expect(readFileSync(path.join(dir, "cookies-seen.txt"), "utf-8")).toBe("# cookies");
     expect(readdirSync(scratch)).toEqual([]);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("captions", () => {
+  const json3 = (ext = "json3", name = "English") => [{ ext: "vtt", url: "u" }, { ext, url: "u", name }];
+
+  it("offers the uploader's captions and the automatic ones in the video's language", () => {
+    const tracks = parseCaptionTracks({
+      language: "en",
+      subtitles: { en: json3(), "de-DE": json3("json3", "Deutsch"), live_chat: json3(), "bad id!": json3(), fr: [{ ext: "vtt", url: "u" }] },
+      automatic_captions: { "en-orig": json3("json3", "English (Original)"), en: json3(), de: json3(), ja: json3() },
+    });
+    expect(tracks).toEqual([
+      { id: "en", label: "English", auto: false },
+      { id: "de-DE", label: "Deutsch", auto: false },
+      { id: "en-orig", label: "English (Original)", auto: true },
+    ]);
+    expect(parseCaptionTracks({ automatic_captions: { en: json3() } })).toEqual([]);
+    expect(parseCaptionTracks({ language: "fr", automatic_captions: { fr: json3("json3", "French") } })).toEqual([{ id: "fr", label: "French", auto: true }]);
+  });
+
+  it("reads YouTube's json3 lines, dropping empty ones", () => {
+    const cues = parseCaptions(
+      JSON.stringify({
+        events: [
+          { tStartMs: 5000, dDurationMs: 1000, segs: [{ utf8: "second" }] },
+          { tStartMs: 1000, dDurationMs: 2000, segs: [{ utf8: "Hello " }, { utf8: " world\n" }] },
+          { tStartMs: 2000, dDurationMs: 500, aAppend: 1, segs: [{ utf8: "\n" }] },
+          { tStartMs: 3000 },
+          { tStartMs: 4000, dDurationMs: 0, segs: [{ utf8: "no time" }] },
+          { tStartMs: 6000, dDurationMs: 1000, segs: [{ utf8: "bell\u0007" }] },
+        ],
+      }),
+    );
+    expect(cues).toEqual([
+      [1000, 3000, "Hello world"],
+      [5000, 6000, "second"],
+      [6000, 7000, "bell"],
+    ]);
+    expect(parseCaptions("{}")).toEqual([]);
   });
 });
