@@ -7,7 +7,7 @@ import { captionsAt, choose, firstTrack, useCaptionStore, type TCaptionView } fr
 import { cls } from "./classes";
 import { formatTime } from "./format";
 import { Queue } from "./queue";
-import { SeekBar } from "./seek-bar";
+import { chapterAt, SeekBar } from "./seek-bar";
 import { add, control, getView, positionOf, refresh, subscribe } from "./store";
 import { say, t } from "./text";
 
@@ -155,6 +155,16 @@ const CaptionLines = ({ captions }: { captions: TCaptionView }) => {
   );
 };
 
+/** the chapter playing, under the title */
+const Chapter = ({ now, position }: { now: TNowPlaying; position: number }) => {
+  const title = chapterAt(now.chapters, position)?.title;
+  return title ? (
+    <p className={cls.chapter} title={title}>
+      {title}
+    </p>
+  ) : null;
+};
+
 const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying; position: number; canControl: boolean; captions: TCaptionView }) => (
   <>
     <div className={cls.nowPlaying}>
@@ -163,6 +173,7 @@ const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying;
         <p className={cls.title} title={now.title}>
           {now.title}
         </p>
+        <Chapter now={now} position={position} />
       </div>
     </div>
     {!now.live && now.duration > 0 && (
@@ -170,6 +181,7 @@ const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying;
         position={position}
         duration={now.duration}
         buffered={now.progress}
+        chapters={now.chapters}
         disabled={!canControl}
         onSeek={(at) => send({ op: "seek", position: Math.floor(at) })}
       />

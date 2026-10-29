@@ -44,6 +44,10 @@ beforeAll(async () => {
       { format_id: "251", vcodec: "none", acodec: "opus", abr: 130, protocol: "https" },
     ],
     subtitles: { en: [{ ext: "json3", url: "https://www.youtube.com/api/timedtext", name: "English" }] },
+    chapters: [
+      { start_time: 0, end_time: 60, title: "Verse" },
+      { start_time: 60, end_time: 120, title: "Chorus" },
+    ],
   });
   // reports a second of progress, then waits to be stopped
   process.env.JOLLYVIDEO_FFMPEG = script(dir, "ffmpeg", "echo out_time_us=1000000\nexec sleep 60");
@@ -116,6 +120,10 @@ describe("the server half", () => {
   it("serves the playing video's captions to whoever is in the channel", async () => {
     const now = lastPush()!.now!;
     expect(now.captions).toEqual([{ id: "en", label: "English", auto: false }]);
+    expect(now.chapters).toEqual([
+      { start: 0, title: "Verse" },
+      { start: 60, title: "Chorus" },
+    ]);
     const captions = (await host.action("captions", USER, CHANNEL, { id: now.id, track: "en", from: 30 })) as TCaptions;
     expect(captions.from).toBe(30);
     expect(captions.until).toBe(330);

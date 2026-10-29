@@ -53,6 +53,7 @@ exit 0`,
     format: "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
     fps: 30,
     captions: [{ id: "en", label: "English", auto: false }],
+    chapters: [],
   };
   const parsed = () => {
     const { code, output } = accepted();

@@ -43,6 +43,10 @@ const ytDlp = fakeYtDlp(work, {
   title: "Sunset over the bay",
   duration: 120,
   // more videos for the queue, from the same files
+  chapters: [
+    { start_time: 0, end_time: 60, title: "Golden hour" },
+    { start_time: 60, end_time: 120, title: "Dusk" },
+  ],
   subtitles: { en: [{ ext: "json3", url: "https://www.youtube.com/api/timedtext", name: "English" }] },
   byQuery: { harbor: { id: "jvDemo00002", title: "Harbor lights" }, night: { id: "jvDemo00003", title: "Night drive" } },
   formats: [

@@ -28,7 +28,16 @@ export const cls = {
   liveBadge:
     "inline-flex items-center justify-center rounded-full border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 border-transparent bg-destructive text-white dark:bg-destructive/60",
   /** Slider */
-  slider: "relative flex w-full touch-none items-center select-none data-[disabled]:opacity-50",
+  slider: "relative flex w-full touch-none items-center select-none data-[disabled]:opacity-50 py-2",
+  /** taller than the track, so it is easy to hit */
+  sliderEnabled: "relative flex w-full touch-none items-center select-none py-2 cursor-pointer",
+  /** where a chapter ends: a gap in the track */
+  chapterGap: "bg-popover absolute h-full",
+  /** TooltipContent, over the point of the bar the mouse is at */
+  seekPreview: "bg-foreground text-background animate-in fade-in-0 zoom-in-95 z-50 w-fit rounded-md px-3 py-1.5 text-xs absolute pointer-events-none whitespace-nowrap",
+  seekPreviewTime: "block text-center font-medium",
+  seekPreviewChapter: "block max-w-40 truncate",
+  chapter: "text-xs text-muted-foreground truncate",
   sliderTrack: "bg-muted relative grow overflow-hidden rounded-full data-[orientation=horizontal]:h-1.5 data-[orientation=horizontal]:w-full",
   sliderRange: "bg-primary absolute data-[orientation=horizontal]:h-full",
   /** how much is downloaded, under the range */

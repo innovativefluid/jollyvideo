@@ -35,6 +35,13 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
     { id: "en", label: "English", auto: false },
     { id: "de", label: "German", auto: false },
   ],
+  chapters: [
+    { start: 0, title: "Opening" },
+    { start: 95, title: "The bunny wakes up" },
+    { start: 210, title: "Three bullies" },
+    { start: 400, title: "Revenge" },
+    { start: 560, title: "Credits" },
+  ],
   state: "playing",
   position: 127,
   progress: null,
@@ -79,7 +86,7 @@ const control = (op: TControl) => {
   if (op.op === "stop") Object.assign(player, { now: null, queue: [] });
   if (op.op === "skip") {
     const [next, ...rest] = player.queue;
-    player.now = next ? { ...next, thumbnail: "", captions: [], state: "playing", position: 0 } : null;
+    player.now = next ? { ...next, thumbnail: "", captions: [], chapters: [], state: "playing", position: 0 } : null;
     player.queue = rest;
   }
   update(player);

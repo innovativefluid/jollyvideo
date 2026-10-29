@@ -17,6 +17,7 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   live: false,
   thumbnail: "/plugins/jollyvideo/thumb/aqz-KE-bpKQ.jpg",
   captions: [],
+  chapters: [],
   state: "playing",
   position: 10,
   progress: null,
@@ -186,6 +187,51 @@ describe("the panel", () => {
     await act(async () => fireEvent.keyDown(screen.getByRole("slider"), { key: "ArrowRight" }));
     expect(controls()).toEqual([{ op: "seek", position: 35 }]);
     expect(screen.getByRole("button", { name: "Play" })).toBeDefined();
+  });
+
+  /** the seek bar's track: 200 px wide from x = 100 */
+  const layOutTrack = () => {
+    const track = document.querySelector<HTMLElement>(`[role=dialog] [data-orientation=horizontal].${cls.sliderTrack.split(" ")[0]}`)!;
+    track.getBoundingClientRect = () => ({ left: 100, width: 200, top: 0, height: 6, right: 300, bottom: 6, x: 100, y: 0, toJSON() {} }) as DOMRect;
+    return track.parentElement!;
+  };
+  const chapters = [
+    { start: 0, title: "Intro" },
+    { start: 60, title: "The middle" },
+    { start: 100, title: "" },
+  ];
+
+  it("shows the time and chapter under the mouse, and seeks to it on a click", async () => {
+    await open();
+    await show({ player: player({ now: now({ chapters }) }), canModerate: false });
+    const bar = layOutTrack();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await act(async () => fireEvent.pointerMove(bar, { pointerType: "mouse", clientX: 220 }));
+    expect(screen.getByRole("tooltip").textContent).toBe("1:12The middle");
+    await act(async () => fireEvent.pointerMove(bar, { pointerType: "mouse", clientX: 290 }));
+    // a chapter without a title shows just the time
+    expect(screen.getByRole("tooltip").textContent).toBe("1:54");
+    await act(async () => fireEvent.pointerLeave(bar));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    // gaps where the second and third chapters start
+    expect(document.querySelectorAll(`[role=dialog] .${cls.chapterGap.split(" ")[0]}`)).toHaveLength(2);
+    // the chapter playing (10 s in) under the title
+    expect(screen.getByText("Intro")).toBeDefined();
+    expect(controls()).toEqual([]);
+  });
+
+  it("shows where a drag goes, and seeks only when let go", async () => {
+    await open();
+    await show({ player: player({ now: now({ chapters }) }), canModerate: false });
+    const bar = layOutTrack();
+    await act(async () => fireEvent.pointerDown(bar, { button: 0, pointerId: 1, pointerType: "touch", clientX: 110 }));
+    await act(async () => fireEvent.pointerMove(bar, { pointerId: 1, pointerType: "touch", clientX: 250 }));
+    expect(screen.getByRole("tooltip").textContent).toBe("1:30The middle");
+    expect(screen.getByRole("slider").getAttribute("aria-valuenow")).toBe("90");
+    expect(controls()).toEqual([]);
+    await act(async () => fireEvent.pointerUp(bar, { pointerId: 1, pointerType: "touch", clientX: 250 }));
+    expect(controls()).toEqual([{ op: "seek", position: 90 }]);
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
   it("marks livestreams and leaves out what they cannot do", async () => {

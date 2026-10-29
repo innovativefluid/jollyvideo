@@ -5,7 +5,7 @@
 import { existsSync } from "fs";
 import { chmod, copyFile, mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
-import { MAX_QUERY_LENGTH, MAX_QUEUE, type TCaptionTrack, type TCue } from "../contract";
+import { MAX_QUERY_LENGTH, MAX_QUEUE, type TCaptionTrack, type TChapter, type TCue } from "../contract";
 import type { TMessageKey } from "../i18n";
 import { UserError } from "./errors";
 import { limiter, run, type TRunOptions } from "./proc";
@@ -46,6 +46,7 @@ export type TResolved = {
   info?: string;
   /** caption languages: the uploader's, then YouTube's automatic ones in the video's language */
   captions: TCaptionTrack[];
+  chapters: TChapter[];
 };
 
 export type TLookupOptions = {
@@ -271,6 +272,23 @@ type TInfo = {
   language?: unknown;
   subtitles?: unknown;
   automatic_captions?: unknown;
+  chapters?: unknown;
+};
+
+const MAX_CHAPTERS = 100;
+
+/** the uploader's chapters, in order, each starting inside the video */
+export const parseChapters = (value: unknown, duration: number): TChapter[] => {
+  if (!Array.isArray(value) || duration <= 0) return [];
+  const chapters: TChapter[] = [];
+  for (const chapter of value as { start_time?: unknown; title?: unknown }[]) {
+    const start = typeof chapter?.start_time === "number" && Number.isFinite(chapter.start_time) ? Math.max(0, Math.round(chapter.start_time)) : NaN;
+    if (!(start < duration) || (chapters.length && start <= chapters.at(-1)!.start)) continue;
+    chapters.push({ start, title: titleOf(chapter.title, "").slice(0, 100) });
+    if (chapters.length >= MAX_CHAPTERS) break;
+  }
+  // one chapter is no chapters
+  return chapters.length > 1 ? chapters : [];
 };
 
 const MAX_TRACKS = 30;
@@ -345,11 +363,11 @@ export const parseInfo = (stdout: string, source: TSource, q: TQuality): TResolv
   if (live) {
     const hls = pickLive(formats, q);
     if (!hls?.url?.startsWith("https://")) throw new UserError("yt.liveFailed");
-    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} }, captions: [] };
+    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} }, captions: [], chapters: [] };
   }
   const duration = secondsOf(info.duration);
   const start = source.kind === "video" && source.start < duration ? source.start : 0;
-  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q), captions: parseCaptionTracks(info) };
+  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q), captions: parseCaptionTracks(info), chapters: parseChapters(info.chapters, duration) };
 };
 
 /** a flat playlist: what can be played, without the private and deleted ones */

@@ -51,8 +51,16 @@ test('watches a video together in a voice channel', async ({ page }) => {
 
   // playing, with its length from the lookup
   await expect(panel.getByText(/^0:\d\d \/ 2:00$/)).toBeVisible({ timeout: 60_000 });
-  await expect(panel.getByRole('paragraph')).toHaveText('Sunset over the bay');
+  await expect(panel.getByTitle('Sunset over the bay')).toBeVisible();
   await expectFrames(page);
+
+  // pointing at the bar shows where a click goes, with the chapter there
+  const bar = (await panel.getByRole('slider', { name: 'Position' }).locator('..').boundingBox())!;
+  await page.mouse.move(bar.x + bar.width * 0.75, bar.y + bar.height / 2);
+  await expect(page.getByRole('tooltip')).toHaveText(/^1:\d\dDusk$/);
+  await page.mouse.move(bar.x + bar.width / 2, bar.y - 60);
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+  await expect(panel.getByText('Golden hour')).toBeVisible();
 
   // captions, for this viewer: the line for where the video is
   await panel.getByRole('button', { name: 'Captions' }).click();

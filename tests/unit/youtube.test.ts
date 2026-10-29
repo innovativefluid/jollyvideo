@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { UserError } from "../../src/server/errors";
 import { QUALITIES } from "../../src/server/settings";
-import { commonArgs, createYouTube, describeFailure, parseCaptions, parseCaptionTracks, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
+import { commonArgs, createYouTube, describeFailure, parseCaptions, parseChapters, parseCaptionTracks, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
 
 import { script } from "../helpers/fake-host";
 
@@ -310,5 +310,30 @@ describe("captions", () => {
       [6000, 7000, "bell"],
     ]);
     expect(parseCaptions("{}")).toEqual([]);
+  });
+});
+
+describe("chapters", () => {
+  it("keeps the uploader's chapters that start inside the video, in order", () => {
+    expect(
+      parseChapters(
+        [
+          { start_time: 0, end_time: 60, title: " Intro " },
+          { start_time: 59.6, title: "Too close\u0007" },
+          { start_time: 30, title: "Out of order" },
+          { start_time: 120, title: "" },
+          { start_time: 999, title: "Past the end" },
+          { start_time: "x", title: "No time" },
+        ],
+        600,
+      ),
+    ).toEqual([
+      { start: 0, title: "Intro" },
+      { start: 60, title: "Too close" },
+      { start: 120, title: "" },
+    ]);
+    expect(parseChapters([{ start_time: 0, title: "Only one" }], 600)).toEqual([]);
+    expect(parseChapters(undefined, 600)).toEqual([]);
+    expect(parseChapters([{ start_time: 0 }, { start_time: 5 }], 0)).toEqual([]);
   });
 });

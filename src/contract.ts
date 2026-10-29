@@ -34,10 +34,14 @@ export type TCaptions = {
   until: number;
 };
 
+/** a chapter of the video, from its description: starts `start` seconds in */
+export type TChapter = { start: number; title: string };
+
 export type TNowPlaying = TVideo & {
   /** same-origin path of the cached thumbnail, or "" */
   thumbnail: string;
   captions: TCaptionTrack[];
+  chapters: TChapter[];
   state: "loading" | "playing" | "paused";
   /** seconds into the video when this state was produced */
   position: number;

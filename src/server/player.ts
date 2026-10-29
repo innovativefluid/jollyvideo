@@ -333,6 +333,7 @@ export class ChannelPlayer {
       ...entry(current.item),
       thumbnail: current.item.video ? this.deps.thumbnail(current.item.video.videoId) : "",
       captions: current.item.video?.captions ?? [],
+      chapters: current.item.video?.chapters ?? [],
       state: current.state,
       position: Math.floor(this.position(current)),
     };

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- The time bar shows the time (and chapter) under the mouse, and where a drag goes; it seeks when let go. It is easier to hit.
+- YouTube chapters: marks on the time bar, and the chapter playing under the title.
+
 ## 0.4.0
 
 - Captions: the Captions button in the panel shows the video's captions under the controls, for you alone, in the language you pick. The uploader's captions come first, then YouTube's automatic ones in the video's language.

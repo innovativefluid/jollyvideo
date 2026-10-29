@@ -45,6 +45,7 @@ const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResol
   format: "bv*+ba/b",
   fps: 30,
   captions: [],
+  chapters: [],
   ...extra,
 });
 const live = (id: string): TResolved => ({ ...vod(id, 0), live: true, parts: null, hls: { url: `https://m/${id}.m3u8`, headers: {} } });
