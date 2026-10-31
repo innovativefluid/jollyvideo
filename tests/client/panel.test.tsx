@@ -18,6 +18,7 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   thumbnail: "/plugins/jollyvideo/thumb/aqz-KE-bpKQ.jpg",
   captions: [],
   chapters: [],
+  storyboard: null,
   state: "playing",
   position: 10,
   progress: null,
@@ -218,6 +219,22 @@ describe("the panel", () => {
     // the chapter playing (10 s in) under the title
     expect(screen.getByText("Intro")).toBeDefined();
     expect(controls()).toEqual([]);
+  });
+
+  it("shows the storyboard frame of the time under the mouse", async () => {
+    const storyboard = { url: "/thumb/k/v/sb{n}.jpg", count: 2, width: 80, height: 45, columns: 5, rows: 5, interval: 2 };
+    await open();
+    await show({ player: player({ now: now({ storyboard }) }), canModerate: false });
+    const bar = layOutTrack();
+    // 0.6 × 120 s = 72 s: frame 36, the 12th of the second sheet, row 2, column 1
+    await act(async () => fireEvent.pointerMove(bar, { pointerType: "mouse", clientX: 220 }));
+    const image = screen.getByRole("tooltip").querySelector("img")!;
+    expect(image.getAttribute("src")).toBe("/thumb/k/v/sb1.jpg");
+    expect([image.style.width, image.style.left, image.style.top]).toEqual(["800px", "-160px", "-180px"]);
+    // a sheet that does not load leaves just the time
+    await act(async () => fireEvent.error(image));
+    expect(screen.getByRole("tooltip").querySelector("img")).toBeNull();
+    expect(screen.getByRole("tooltip").textContent).toBe("1:12");
   });
 
   it("shows where a drag goes, and seeks only when let go", async () => {

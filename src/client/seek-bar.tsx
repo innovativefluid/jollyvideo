@@ -5,7 +5,8 @@
  * Chapters are gaps in the track, as on YouTube.
  */
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import type { TChapter } from "../contract";
+import { createPortal } from "react-dom";
+import type { TChapter, TStoryboard } from "../contract";
 import { cls } from "./classes";
 import { formatTime } from "./format";
 import { t } from "./text";
@@ -16,6 +17,7 @@ type TSeekBarProps = {
   /** how much is downloaded, 0..1, while it downloads */
   buffered: number | null;
   chapters: TChapter[];
+  storyboard: TStoryboard | null;
   disabled: boolean;
   onSeek(position: number): void;
 };
@@ -32,9 +34,37 @@ export const chapterAt = (chapters: TChapter[], time: number): TChapter | null =
   return found;
 };
 
+/** how wide the preview's frame is shown */
+const FRAME_PX = 160;
+
+/** the storyboard frame for `time`: one frame of a sheet, shown through a window its size */
+const Frame = ({ board, time, duration }: { board: TStoryboard; time: number; duration: number }) => {
+  const [failed, setFailed] = useState<string | null>(null);
+  const perSheet = board.columns * board.rows;
+  // the last sheet is only partly filled
+  const last = Math.min(board.count * perSheet, Math.round(duration / board.interval)) - 1;
+  const index = Math.max(0, Math.min(Math.floor(time / board.interval), last));
+  const sheet = board.url.replace("{n}", String(Math.floor(index / perSheet)));
+  if (failed === sheet) return null;
+  const tile = index % perSheet;
+  const width = FRAME_PX;
+  const height = (board.height / board.width) * FRAME_PX;
+  return (
+    <div className={cls.seekPreviewFrame} style={{ width, height }}>
+      <img
+        src={sheet}
+        alt=""
+        draggable={false}
+        onError={() => setFailed(sheet)}
+        style={{ position: "absolute", maxWidth: "none", width: board.columns * width, left: -(tile % board.columns) * width, top: -Math.floor(tile / board.columns) * height }}
+      />
+    </div>
+  );
+};
+
 const percentOf = (time: number, duration: number) => (duration > 0 ? Math.min(100, Math.max(0, (time / duration) * 100)) : 0);
 
-export const SeekBar = ({ position, duration, buffered, chapters, disabled, onSeek }: TSeekBarProps) => {
+export const SeekBar = ({ position, duration, buffered, chapters, storyboard, disabled, onSeek }: TSeekBarProps) => {
   const track = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<number | null>(null);
   /** the time under the mouse, while it is over the bar */
@@ -108,17 +138,30 @@ export const SeekBar = ({ position, duration, buffered, chapters, disabled, onSe
         style={{ left: `calc(${percent}% - ${(percent / 100) * THUMB_PX}px)` }}
         onKeyDown={onKeyDown}
       />
-      {preview !== null && (
-        <div
-          role="tooltip"
-          className={cls.seekPreview}
-          // over the pointer, and shifted along so it never leaves the bar at either end
-          style={{ left: `${previewPercent}%`, bottom: "calc(100% + 2px)", transform: `translateX(-${previewPercent}%)` }}
-        >
-          <span className={cls.seekPreviewTime}>{formatTime(preview)}</span>
-          {previewChapter?.title && <span className={cls.seekPreviewChapter}>{previewChapter.title}</span>}
-        </div>
-      )}
+      {preview !== null &&
+        track.current &&
+        // on the page, not in the panel, which would cut it off at its top
+        createPortal(
+          <div
+            role="tooltip"
+            className={cls.seekPreview}
+            // over the pointer, and shifted along so it never leaves the bar at either end
+            style={(() => {
+              const rect = track.current.getBoundingClientRect();
+              return {
+                position: "fixed",
+                left: rect.left + (previewPercent / 100) * rect.width,
+                top: rect.top - 10,
+                transform: `translate(-${previewPercent}%, -100%)`,
+              } as const;
+            })()}
+          >
+            {storyboard && <Frame board={storyboard} time={preview} duration={duration} />}
+            <span className={cls.seekPreviewTime}>{formatTime(preview)}</span>
+            {previewChapter?.title && <span className={cls.seekPreviewChapter}>{previewChapter.title}</span>}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };

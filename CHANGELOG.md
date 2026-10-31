@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- The time bar's preview shows a small picture of the video at that time, from YouTube's storyboards (fetched through the server like the thumbnails).
+
 ## 0.5.0
 
 - The time bar shows the time (and chapter) under the mouse, and where a drag goes; it seeks when let go. It is easier to hit.

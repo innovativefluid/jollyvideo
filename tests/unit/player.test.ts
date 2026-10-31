@@ -46,6 +46,7 @@ const vod = (id: string, duration = 200, extra: Partial<TResolved> = {}): TResol
   fps: 30,
   captions: [],
   chapters: [],
+  storyboard: null,
   ...extra,
 });
 const live = (id: string): TResolved => ({ ...vod(id, 0), live: true, parts: null, hls: { url: `https://m/${id}.m3u8`, headers: {} } });
@@ -177,6 +178,7 @@ const setup = (videos: Record<string, TResolved | Error>, options: TSetup = {}) 
       };
     },
     thumbnail: (videoId) => `/thumb/${videoId}.jpg`,
+    storyboard: (videoId, sheets) => `/thumb/${videoId}/sb{n}.jpg?${sheets.length}`,
     prefetchDelayMs: options.prefetchDelayMs ?? 0,
     slotFree: () => slots,
     slotFreed: () => freed++,
@@ -676,6 +678,14 @@ describe("ChannelPlayer", () => {
     expect(t.errors).toHaveLength(1);
     await expect(t.player.captions(id, "de", 0)).rejects.toThrow(UserError);
     await expect(t.player.captions("other", "en", 0)).rejects.toThrow("Nothing is playing");
+  });
+
+  it("shows the playing video's storyboard, its sheets served for the channel", async () => {
+    const storyboard = { sheets: ["https://i.ytimg.com/sb/a/M0.jpg", "https://i.ytimg.com/sb/a/M1.jpg"], width: 160, height: 90, columns: 5, rows: 5, interval: 2 };
+    const t = setup({ a: vod("a", 600, { storyboard }) });
+    t.player.add("a", 1);
+    await flush();
+    expect(t.player.snapshot().now!.storyboard).toEqual({ url: "/thumb/axxxxxxxxxx/sb{n}.jpg?2", count: 2, width: 160, height: 90, columns: 5, rows: 5, interval: 2 });
   });
 
   it("keeps the state it pushes small", () => {

@@ -8,6 +8,7 @@ import path from "path";
 import { MAX_QUERY_LENGTH, MAX_QUEUE, type TCaptionTrack, type TChapter, type TCue } from "../contract";
 import type { TMessageKey } from "../i18n";
 import { UserError } from "./errors";
+import { isYouTubeImage } from "./thumbnails";
 import { limiter, run, type TRunOptions } from "./proc";
 import type { TQuality } from "./settings";
 
@@ -47,7 +48,11 @@ export type TResolved = {
   /** caption languages: the uploader's, then YouTube's automatic ones in the video's language */
   captions: TCaptionTrack[];
   chapters: TChapter[];
+  /** YouTube's storyboard for the time bar's preview, its sheets still on YouTube */
+  storyboard: TSourceStoryboard | null;
 };
+
+export type TSourceStoryboard = { sheets: string[]; width: number; height: number; columns: number; rows: number; interval: number };
 
 export type TLookupOptions = {
   /** jumps the queue of lookups: the video is needed now; asked again while it waits */
@@ -275,6 +280,30 @@ type TInfo = {
   chapters?: unknown;
 };
 
+/** frames this wide or less make a preview; the next larger set is a lot more to download */
+const STORYBOARD_WIDTH = 160;
+const MAX_SHEETS = 300;
+
+type TStoryboardFormat = { format_note?: unknown; width?: unknown; height?: unknown; rows?: unknown; columns?: unknown; fragments?: unknown };
+
+const whole = (value: unknown, max: number) => (typeof value === "number" && Number.isInteger(value) && value > 0 && value <= max ? value : 0);
+
+/** the storyboard closest to STORYBOARD_WIDTH from below (else the smallest), with sheets on YouTube's image hosts */
+export const pickStoryboard = (formats: unknown[]): TSourceStoryboard | null => {
+  const boards = (formats as TStoryboardFormat[]).flatMap((format): TSourceStoryboard[] => {
+    if (format?.format_note !== "storyboard" || !Array.isArray(format.fragments)) return [];
+    const [width, height, columns, rows] = [whole(format.width, 1280), whole(format.height, 720), whole(format.columns, 20), whole(format.rows, 20)];
+    const fragments = format.fragments as { url?: unknown; duration?: unknown }[];
+    const first = Number(fragments[0]?.duration);
+    if (!width || !height || !columns || !rows || !(first > 0) || !fragments.length || fragments.length > MAX_SHEETS) return [];
+    const sheets = fragments.map((fragment) => (typeof fragment?.url === "string" ? fragment.url : ""));
+    if (!sheets.every(isYouTubeImage)) return [];
+    return [{ sheets, width, height, columns, rows, interval: first / (columns * rows) }];
+  });
+  const fitting = boards.filter((board) => board.width <= STORYBOARD_WIDTH).sort((a, b) => b.width - a.width);
+  return fitting[0] ?? boards.sort((a, b) => a.width - b.width)[0] ?? null;
+};
+
 const MAX_CHAPTERS = 100;
 
 /** the uploader's chapters, in order, each starting inside the video */
@@ -363,11 +392,11 @@ export const parseInfo = (stdout: string, source: TSource, q: TQuality): TResolv
   if (live) {
     const hls = pickLive(formats, q);
     if (!hls?.url?.startsWith("https://")) throw new UserError("yt.liveFailed");
-    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} }, captions: [], chapters: [] };
+    return { videoId, title, duration: 0, live, start: 0, url, parts: null, format: "", fps: hls.fps ?? null, hls: { url: hls.url, headers: hls.http_headers ?? {} }, captions: [], chapters: [], storyboard: null };
   }
   const duration = secondsOf(info.duration);
   const start = source.kind === "video" && source.start < duration ? source.start : 0;
-  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q), captions: parseCaptionTracks(info), chapters: parseChapters(info.chapters, duration) };
+  return { videoId, title, duration, live, start, url, ...pickFormat(formats, q), captions: parseCaptionTracks(info), chapters: parseChapters(info.chapters, duration), storyboard: pickStoryboard(formats) };
 };
 
 /** a flat playlist: what can be played, without the private and deleted ones */

@@ -5,7 +5,7 @@ import { boxWidth, encoderArgs, h264Level, type TEncodeOptions } from "../../src
 import { parseControl } from "../../src/server/index";
 import { closeWhenEmpty, fitted } from "../../src/server/players";
 import { QUALITIES, readSettings } from "../../src/server/settings";
-import { Thumbnails } from "../../src/server/thumbnails";
+import { isYouTubeImage, Thumbnails } from "../../src/server/thumbnails";
 
 const options = (extra: Partial<TEncodeOptions> = {}): TEncodeOptions => ({
   ffmpeg: "/ffmpeg",
@@ -143,7 +143,7 @@ describe("thumbnails", () => {
       expect(result.headers["Content-Type"]).toBe("image/jpeg");
       expect(result.body).toBe(jpeg);
     }
-    expect(fetched).toEqual(["dQw4w9WgXcQ"]);
+    expect(fetched).toEqual(["https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"]);
 
     for (const url of [
       `/plugins/jollyvideo/thumb/${key}/aaaaaaaaaaa.jpg`,
@@ -158,7 +158,38 @@ describe("thumbnails", () => {
       await thumbs.handle(request(url), res);
       expect(result.status).toBe(404);
     }
-    expect(fetched).toEqual(["dQw4w9WgXcQ"]);
+    expect(fetched).toEqual(["https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"]);
+  });
+
+  it("serves a playing video's storyboard sheets, from YouTube's image hosts only", async () => {
+    const fetched: string[] = [];
+    const thumbs = new Thumbnails("/p", console, async (url) => {
+      fetched.push(url);
+      return jpeg;
+    });
+    const sheets = ["https://i.ytimg.com/sb/dQw4w9WgXcQ/storyboard3_L2/M0.jpg?sigh=a", "https://evil.example/M1.jpg", "https://i.ytimg.com/sb/dQw4w9WgXcQ/storyboard3_L2/M2.jpg?sigh=c"];
+    const template = thumbs.storyboard(1, "dQw4w9WgXcQ", sheets);
+    expect(template).toMatch(/^\/p\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\/sb\{n\}\.jpg$/);
+    const status = async (n: number | string) => {
+      const { res, result } = fakeResponse();
+      await thumbs.handle(request(template.replace("{n}", String(n))), res);
+      return result.status;
+    };
+    expect([await status(0), await status(1), await status(2), await status(3), await status("x")]).toEqual([200, 404, 200, 404, 404]);
+    expect(fetched).toEqual([sheets[0]!, sheets[2]!]);
+    // the channel's key only
+    const other = thumbs.storyboard(2, "dQw4w9WgXcQ", []);
+    const { res, result } = fakeResponse();
+    await thumbs.handle(request(other.replace("{n}", "0")), res);
+    expect(result.status).toBe(404);
+  });
+
+  it("knows YouTube's image hosts", () => {
+    expect(isYouTubeImage("https://i.ytimg.com/vi/x/mqdefault.jpg")).toBe(true);
+    expect(isYouTubeImage("https://i9.ytimg.com/sb/x/M0.jpg")).toBe(true);
+    for (const url of ["http://i.ytimg.com/x.jpg", "https://i.ytimg.com.evil.example/x.jpg", "https://a@i.ytimg.com/x.jpg", "https://i.ytimg.com:8443/x.jpg", "nope"]) {
+      expect(isYouTubeImage(url)).toBe(false);
+    }
   });
 
   it("does not ask YouTube again right after a failure", async () => {
@@ -175,7 +206,7 @@ describe("thumbnails", () => {
   it("forgets the oldest of many", async () => {
     const thumbs = new Thumbnails("/p", console, async () => jpeg);
     const first = thumbs.url(1, "v0000000000");
-    for (let i = 1; i < 201; i++) thumbs.url(1, `v${String(i).padStart(10, "0")}`);
+    for (let i = 1; i < 2001; i++) thumbs.url(1, `v${String(i).padStart(10, "0")}`);
     const { res, result } = fakeResponse();
     await thumbs.handle(request(first), res);
     expect(result.status).toBe(404);

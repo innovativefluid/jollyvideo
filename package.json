@@ -1,6 +1,6 @@
 {
   "name": "jollyvideo",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Watch YouTube videos and livestreams together in Sharkord voice channels",
   "private": true,
   "type": "module",

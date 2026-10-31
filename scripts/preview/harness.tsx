@@ -25,6 +25,15 @@ const thumbnail = (hue: number) =>
     `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><defs><linearGradient id="g" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue} 70% 55%)"/><stop offset="1" stop-color="hsl(${hue + 60} 70% 30%)"/></linearGradient></defs><rect width="320" height="180" fill="url(#g)"/></svg>`,
   )}`;
 
+/** a stand-in storyboard sheet: 5 × 5 frames, each with its own colour and number */
+const storyboardSheet = `data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450">${Array.from({ length: 25 }, (_, i) => {
+    const x = (i % 5) * 160;
+    const y = Math.floor(i / 5) * 90;
+    return `<rect x="${x}" y="${y}" width="160" height="90" fill="hsl(${i * 14} 60% 45%)"/><text x="${x + 80}" y="${y + 54}" font-size="28" font-family="sans-serif" fill="white" text-anchor="middle">${i}</text>`;
+  }).join("")}</svg>`,
+)}`;
+
 const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
   id: "now",
   title: "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
@@ -35,6 +44,15 @@ const now = (extra: Partial<TNowPlaying> = {}): TNowPlaying => ({
     { id: "en", label: "English", auto: false },
     { id: "de", label: "German", auto: false },
   ],
+  storyboard: {
+    url: storyboardSheet,
+    count: 6,
+    width: 160,
+    height: 90,
+    columns: 5,
+    rows: 5,
+    interval: 634 / 150,
+  },
   chapters: [
     { start: 0, title: "Opening" },
     { start: 95, title: "The bunny wakes up" },
@@ -86,7 +104,7 @@ const control = (op: TControl) => {
   if (op.op === "stop") Object.assign(player, { now: null, queue: [] });
   if (op.op === "skip") {
     const [next, ...rest] = player.queue;
-    player.now = next ? { ...next, thumbnail: "", captions: [], chapters: [], state: "playing", position: 0 } : null;
+    player.now = next ? { ...next, thumbnail: "", captions: [], chapters: [], storyboard: null, state: "playing", position: 0 } : null;
     player.queue = rest;
   }
   update(player);

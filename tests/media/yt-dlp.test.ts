@@ -54,6 +54,7 @@ exit 0`,
     fps: 30,
     captions: [{ id: "en", label: "English", auto: false }],
     chapters: [],
+    storyboard: null,
   };
   const parsed = () => {
     const { code, output } = accepted();

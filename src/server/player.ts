@@ -6,7 +6,7 @@
  */
 import { mkdir, rm } from "fs/promises";
 import path from "path";
-import { CAPTION_WINDOW, MAX_QUEUE, type TCaptions, type TCue, type TPlayer, type TQueueEntry } from "../contract";
+import { CAPTION_WINDOW, MAX_QUEUE, type TCaptions, type TCue, type TPlayer, type TStoryboard, type TQueueEntry } from "../contract";
 import type { TMessage } from "../i18n";
 import type { TEncodeOptions, TEncoder, TEncoderEvents, TExit } from "./encoder";
 import { h264Level } from "./encoder";
@@ -27,6 +27,8 @@ export type TPlayerDeps = {
   createOutput(channelId: number): TOutput;
   encode(options: TEncodeOptions, events: TEncoderEvents): TEncoder;
   thumbnail(videoId: string): string;
+  /** allows the storyboard's sheets for this channel; the URL they are served at, with `{n}` */
+  storyboard(videoId: string, sheets: string[]): string;
   /** whether one more video may start playing on the server */
   slotFree(): boolean;
   /** this player stopped holding a slot, so a waiting one may start */
@@ -334,6 +336,7 @@ export class ChannelPlayer {
       thumbnail: current.item.video ? this.deps.thumbnail(current.item.video.videoId) : "",
       captions: current.item.video?.captions ?? [],
       chapters: current.item.video?.chapters ?? [],
+      storyboard: this.storyboardOf(current.item.video),
       state: current.state,
       position: Math.floor(this.position(current)),
     };
@@ -668,6 +671,13 @@ export class ChannelPlayer {
     } catch (error) {
       if (this.current === current) this.finish(current, error);
     }
+  }
+
+  private storyboardOf(video: TResolved | null): TStoryboard | null {
+    const board = video?.storyboard;
+    if (!board) return null;
+    const { sheets, ...rest } = board;
+    return { ...rest, url: this.deps.storyboard(video.videoId, sheets), count: sheets.length };
   }
 
   private label(video: TResolved) {

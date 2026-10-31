@@ -182,6 +182,7 @@ const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying;
         duration={now.duration}
         buffered={now.progress}
         chapters={now.chapters}
+        storyboard={now.storyboard}
         disabled={!canControl}
         onSeek={(at) => send({ op: "seek", position: Math.floor(at) })}
       />

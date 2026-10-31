@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { UserError } from "../../src/server/errors";
 import { QUALITIES } from "../../src/server/settings";
-import { commonArgs, createYouTube, describeFailure, parseCaptions, parseChapters, parseCaptionTracks, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
+import { commonArgs, createYouTube, describeFailure, parseCaptions, parseChapters, pickStoryboard, parseCaptionTracks, parseInfo, parsePlaylist, parseQuery, parseStart, pickFormat, pickLive, sourceArg, ytDlpEnv } from "../../src/server/youtube";
 
 import { script } from "../helpers/fake-host";
 
@@ -335,5 +335,42 @@ describe("chapters", () => {
     expect(parseChapters([{ start_time: 0, title: "Only one" }], 600)).toEqual([]);
     expect(parseChapters(undefined, 600)).toEqual([]);
     expect(parseChapters([{ start_time: 0 }, { start_time: 5 }], 0)).toEqual([]);
+  });
+});
+
+describe("storyboards", () => {
+  const board = (id: string, width: number, height: number, columns: number, rows: number, extra: object = {}) => ({
+    format_id: id,
+    format_note: "storyboard",
+    protocol: "mhtml",
+    vcodec: "none",
+    acodec: "none",
+    width,
+    height,
+    columns,
+    rows,
+    fragments: [
+      { url: `https://i.ytimg.com/sb/x/${id}/M0.jpg?sigh=a`, duration: columns * rows * 2 },
+      { url: `https://i.ytimg.com/sb/x/${id}/M1.jpg?sigh=b`, duration: 10 },
+    ],
+    ...extra,
+  });
+
+  it("takes the frames closest to 160 pixels wide, from YouTube's image hosts", () => {
+    const formats = [board("sb0", 320, 180, 3, 3), board("sb1", 160, 90, 5, 5), board("sb2", 80, 45, 10, 10), video("136", 720, "avc1")];
+    expect(pickStoryboard(formats)).toEqual({
+      sheets: ["https://i.ytimg.com/sb/x/sb1/M0.jpg?sigh=a", "https://i.ytimg.com/sb/x/sb1/M1.jpg?sigh=b"],
+      width: 160,
+      height: 90,
+      columns: 5,
+      rows: 5,
+      interval: 2,
+    });
+    expect(pickStoryboard([board("sb0", 320, 180, 3, 3)])?.width).toBe(320);
+    const elsewhere = board("sb1", 160, 90, 5, 5);
+    elsewhere.fragments[1]!.url = "https://evil.example/M1.jpg";
+    expect(pickStoryboard([elsewhere])).toBeNull();
+    expect(pickStoryboard([board("sb1", 160, 90, 0, 5)])).toBeNull();
+    expect(pickStoryboard([video("136", 720, "avc1")])).toBeNull();
   });
 });

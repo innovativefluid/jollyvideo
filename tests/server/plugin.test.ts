@@ -42,6 +42,18 @@ beforeAll(async () => {
     formats: [
       { format_id: "136", vcodec: "avc1", acodec: "none", height: 720, fps: 30, protocol: "https" },
       { format_id: "251", vcodec: "none", acodec: "opus", abr: 130, protocol: "https" },
+      {
+        format_id: "sb1",
+        format_note: "storyboard",
+        protocol: "mhtml",
+        vcodec: "none",
+        acodec: "none",
+        width: 160,
+        height: 90,
+        columns: 5,
+        rows: 5,
+        fragments: [0, 1].map((n) => ({ url: `https://i.ytimg.com/sb/dQw4w9WgXcQ/storyboard3_L2/M${n}.jpg?sigh=x`, duration: 100 })),
+      },
     ],
     subtitles: { en: [{ ext: "json3", url: "https://www.youtube.com/api/timedtext", name: "English" }] },
     chapters: [
@@ -120,6 +132,9 @@ describe("the server half", () => {
   it("serves the playing video's captions to whoever is in the channel", async () => {
     const now = lastPush()!.now!;
     expect(now.captions).toEqual([{ id: "en", label: "English", auto: false }]);
+    expect(now.storyboard).toEqual({ url: expect.stringMatching(/^\/plugins\/jollyvideo\/thumb\/[0-9a-f]{32}\/dQw4w9WgXcQ\/sb\{n\}\.jpg$/), count: 2, width: 160, height: 90, columns: 5, rows: 5, interval: 4 });
+    // the sheets share the thumbnail's key
+    expect(now.storyboard!.url.split("/")[4]).toBe(now.thumbnail.split("/")[4]);
     expect(now.chapters).toEqual([
       { start: 0, title: "Verse" },
       { start: 60, title: "Chorus" },

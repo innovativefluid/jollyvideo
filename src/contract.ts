@@ -37,11 +37,19 @@ export type TCaptions = {
 /** a chapter of the video, from its description: starts `start` seconds in */
 export type TChapter = { start: number; title: string };
 
+/**
+ * Small frames of the video, for the time bar's preview: sheets of `columns`
+ * × `rows` frames of `width` × `height`, a frame every `interval` seconds.
+ * `url` has `{n}` for the sheet's number, from 0 to `count` - 1.
+ */
+export type TStoryboard = { url: string; count: number; width: number; height: number; columns: number; rows: number; interval: number };
+
 export type TNowPlaying = TVideo & {
   /** same-origin path of the cached thumbnail, or "" */
   thumbnail: string;
   captions: TCaptionTrack[];
   chapters: TChapter[];
+  storyboard: TStoryboard | null;
   state: "loading" | "playing" | "paused";
   /** seconds into the video when this state was produced */
   position: number;

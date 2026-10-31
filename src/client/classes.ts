@@ -35,8 +35,10 @@ export const cls = {
   chapterGap: "bg-popover absolute h-full",
   /** TooltipContent, over the point of the bar the mouse is at */
   seekPreview: "bg-foreground text-background animate-in fade-in-0 zoom-in-95 z-50 w-fit rounded-md px-3 py-1.5 text-xs absolute pointer-events-none whitespace-nowrap",
+  /** the window a storyboard frame shows through */
+  seekPreviewFrame: "relative overflow-hidden rounded-sm bg-muted mb-1",
   seekPreviewTime: "block text-center font-medium",
-  seekPreviewChapter: "block max-w-40 truncate",
+  seekPreviewChapter: "block max-w-40 truncate text-center",
   chapter: "text-xs text-muted-foreground truncate",
   sliderTrack: "bg-muted relative grow overflow-hidden rounded-full data-[orientation=horizontal]:h-1.5 data-[orientation=horizontal]:w-full",
   sliderRange: "bg-primary absolute data-[orientation=horizontal]:h-full",
