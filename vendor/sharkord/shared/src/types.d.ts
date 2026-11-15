@@ -15,6 +15,8 @@ export declare enum StreamKind {
 }
 export declare const PRODUCIBLE_STREAM_KINDS: readonly [StreamKind.AUDIO, StreamKind.VIDEO, StreamKind.SCREEN, StreamKind.SCREEN_AUDIO];
 export type TProducibleStreamKind = (typeof PRODUCIBLE_STREAM_KINDS)[number];
+export declare const PAUSABLE_STREAM_KINDS: readonly [StreamKind.VIDEO, StreamKind.SCREEN, StreamKind.SCREEN_AUDIO, StreamKind.EXTERNAL_VIDEO];
+export type TPausableStreamKind = (typeof PAUSABLE_STREAM_KINDS)[number];
 export type TExternalStreamTrackKind = 'audio' | 'video';
 export type TExternalStreamTracks = {
     audio?: boolean;
@@ -67,6 +69,27 @@ export declare enum UserStatus {
 export type TOwnUser = WithOptional<TUser, 'identity'>;
 export type TConnectionParams = {
     token: string;
+};
+export type TUserSessionLocation = {
+    city: string | null;
+    region: string | null;
+    country: string | null;
+    org: string | null;
+    timezone: string | null;
+};
+export type TUserSession = {
+    id: string;
+    connectedAt: number;
+    lastActiveAt: number;
+    voiceChannelId: number | null;
+    ip: string | null;
+    location: TUserSessionLocation | null;
+    os: string | null;
+    device: string | null;
+    browser: string | null;
+    userAgent: string | null;
+    clientVersion: string | null;
+    desktopVersion: string | null;
 };
 export type TTempFile = {
     id: string;
@@ -161,6 +184,11 @@ export type TDirectMessageConversation = {
     userId: number;
     lastMessageAt: number;
     closedAt: number | null;
+};
+export type TFileAccessToken = {
+    id: number;
+    token: string;
+    expiresAt: number;
 };
 export type TMessagesCursor = {
     createdAt: number;

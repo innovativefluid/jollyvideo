@@ -4,8 +4,10 @@ export declare enum PluginCapabilityType {
     ACTION = "action",
     COMPONENT = "component",
     /** named by method and registered path, e.g. 'GET /hello' */
-    HTTP_ROUTE = "http_route"
+    HTTP_ROUTE = "http_route",
+    NOTIFICATION = "notification"
 }
+export declare const PLUGIN_NOTIFICATIONS_CAPABILITY = "notifications";
 export declare enum PluginCapabilityMode {
     PUBLIC = "public",
     RESTRICTED = "restricted"

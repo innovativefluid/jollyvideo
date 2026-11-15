@@ -4,7 +4,7 @@
  */
 import type { Producer, Router } from "mediasoup/types";
 
-export type TCapture = {
+type TCapture = {
   packets: number;
   /** distinct RTP timestamps, one per video frame */
   frames: number;

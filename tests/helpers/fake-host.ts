@@ -9,7 +9,7 @@ import type { Router } from "mediasoup/types";
 
 type THandler = (...args: never[]) => unknown;
 
-export type TFakeStream = {
+type TFakeStream = {
   options: Record<string, unknown>;
   updates: Record<string, unknown>[];
   removed: boolean;

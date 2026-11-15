@@ -20,5 +20,5 @@ export const userMessage = (error: unknown): TMessage => (error instanceof UserE
  * Action errors reach the panel as a message string, so they carry the key
  * for it to translate: `jv:{"key":…}`. Chat commands get English.
  */
-export const ACTION_ERROR_PREFIX = "jv:";
+const ACTION_ERROR_PREFIX = "jv:";
 export const encodeForPanel = (message: TMessage): string => `${ACTION_ERROR_PREFIX}${JSON.stringify(message)}`;

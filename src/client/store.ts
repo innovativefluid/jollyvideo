@@ -9,7 +9,7 @@ import { errorMessage } from "./text";
 
 type TActions = TJollyvideo["actions"];
 
-export type TView = {
+type TView = {
   channelId: number | undefined;
   player: TPlayer | null;
   canModerate: boolean;

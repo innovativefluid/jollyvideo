@@ -1,6 +1,6 @@
 {
   "name": "jollyvideo",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Watch YouTube videos and livestreams together in Sharkord voice channels",
   "private": true,
   "type": "module",
@@ -17,25 +17,25 @@
     "test:package": "bun test tests/package"
   },
   "dependencies": {
-    "lucide-react": "0.544.0"
+    "lucide-react": "1.70.0"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "20.0.10",
+    "@happy-dom/global-registrator": "21.0.4",
     "@sharkord/plugin-sdk": "file:vendor/sharkord/plugin-sdk",
     "@sharkord/shared": "file:vendor/sharkord/shared",
-    "@tailwindcss/cli": "4.1.13",
-    "@testing-library/dom": "10.4.1",
-    "@testing-library/react": "16.3.0",
-    "@types/bun": "1.3.9",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "mediasoup": "3.19.19",
-    "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "tailwindcss": "4.1.13",
+    "@tailwindcss/cli": "4.3.5",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/bun": "1.4.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "mediasoup": "3.32.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwindcss": "4.3.5",
     "tw-animate-css": "1.4.0",
     "typescript": "5.9.3",
-    "zod": "4.3.6"
+    "zod": "4.6.7"
   },
   "trustedDependencies": [
     "mediasoup"

@@ -55,7 +55,7 @@ export const choose = (trackId: string | null): void => {
 const base = (id: string) => id.split("-")[0]!.toLowerCase();
 
 /** the track for the language picked: the same one, else the same language, else the first */
-export const trackFor = (tracks: TCaptionTrack[], wanted: string | null): TCaptionTrack | null => {
+const trackFor = (tracks: TCaptionTrack[], wanted: string | null): TCaptionTrack | null => {
   if (!wanted || !tracks.length) return null;
   return tracks.find((track) => track.id === wanted) ?? tracks.find((track) => base(track.id) === base(wanted)) ?? tracks[0]!;
 };

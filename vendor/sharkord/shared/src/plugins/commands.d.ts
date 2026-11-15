@@ -1,6 +1,6 @@
 import z from 'zod';
-import type { TLocale } from '../statics/locales';
 import type { Permission } from '../statics/permissions';
+import type { TLocale } from '../statics/supported-locales';
 /** One argument of a slash command, rendered as a field in the command chip. */
 export type TCommandArg = {
     name: string;

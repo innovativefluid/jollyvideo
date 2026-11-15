@@ -12,6 +12,7 @@ import { add, control, getView, positionOf, refresh, subscribe } from "./store";
 import { say, t } from "./text";
 
 const WIDTH = 320;
+const TWO_LINES = { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" } as const;
 const GAP = 8;
 
 const useView = () => useSyncExternalStore(subscribe, getView);
@@ -170,7 +171,7 @@ const NowPlaying = ({ now, position, canControl, captions }: { now: TNowPlaying;
     <div className={cls.nowPlaying}>
       <Thumbnail src={now.thumbnail} />
       <div className={cls.nowText}>
-        <p className={cls.title} title={now.title}>
+        <p className={cls.title} style={TWO_LINES} title={now.title}>
           {now.title}
         </p>
         <Chapter now={now} position={position} />

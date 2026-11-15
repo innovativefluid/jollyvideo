@@ -53,6 +53,7 @@ export type TActivityLogDetailsMap = {
     [ActivityLogType.USER_KICKED]: {
         reason: string | undefined;
         kickedBy?: number;
+        sessionId?: string;
     };
     [ActivityLogType.USER_BANNED]: {
         reason: string | undefined;

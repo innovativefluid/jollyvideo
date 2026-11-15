@@ -1,3 +1,4 @@
+import type { TPluginNotification, TPluginNotificationTarget } from '../notifications';
 import type { TCategory, TChannel, TJoinedEmoji, TJoinedPublicUser, TJoinedRole } from '../tables';
 import type { TPublicServerSettings } from '../types';
 import type { TVoiceUserState } from '../voice';
@@ -54,6 +55,14 @@ export type TPluginActions = {
     getUserData: (pluginId: string) => Promise<Record<string, unknown>>;
     setUserData: (pluginId: string, data: Record<string, unknown>) => Promise<void>;
     onPush: (pluginId: string, handler: (data: unknown) => void) => () => void;
+    /**
+     * Shows a system notification from the plugin. Nothing shows when the user
+     * turned plugin notifications off, when one of their roles may not receive
+     * this plugin's notifications, or when the plugin sends too many at once.
+     */
+    notify: (pluginId: string, notification: TPluginNotification) => void;
+    /** the `data` of a clicked notification this plugin sent */
+    onNotificationClick: (pluginId: string, handler: (data: TPluginNotificationTarget['data']) => void) => () => void;
 };
 export type TPluginUserData<T extends Record<string, unknown> = Record<string, unknown>> = {
     data: T;
@@ -109,6 +118,8 @@ export type TPluginHooks = {
     usePlaybackDeviceId: () => string | undefined;
     useHotkey: (action: TPluginHotkeyAction, handler: (phase: TPluginHotkeyPhase) => void) => void;
     useHotkeyBinding: (id: string) => TPluginHotkeyBinding;
+    useNotify: () => (notification: TPluginNotification) => void;
+    useNotificationClick: (handler: (data: unknown) => void) => void;
 };
 /**
  * The bridge between a plugin's client code and the app, on

@@ -55,7 +55,7 @@ const FLUSH_BYTES = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 400 * 1024 * 1024;
 
 /** streams a download to `target`, rejecting it unless its SHA-256 matches */
-export const downloadVerified = async (url: string, sha256: string, target: string, log: TLog): Promise<void> => {
+const downloadVerified = async (url: string, sha256: string, target: string, log: TLog): Promise<void> => {
   log.log(`[tools] downloading ${path.basename(new URL(url).pathname)}`);
   const response = await fetch(url, { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(15 * 60_000) });
   if (!response.ok || !response.body) throw new Error(`download failed with HTTP ${response.status}`);

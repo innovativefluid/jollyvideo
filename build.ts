@@ -2,7 +2,7 @@
  * Builds the plugin folder Sharkord loads, then packs it:
  *
  *   dist/jollyvideo/                 manifest.json, server/index.js, client/index.js, docs
- *   dist/jollyvideo-<version>.tar.gz for installing from a URL
+ *   dist/jollyvideo-<version>.tar.gz for uploading under Server settings → Plugins
  *   dist/jollyvideo-<version>.zip    for unpacking into the plugins folder by hand
  *   dist/*.sha256
  *

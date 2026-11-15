@@ -55,7 +55,8 @@ export const cls = {
   nowPlaying: "flex gap-3",
   thumbnail: "aspect-video w-24 shrink-0 rounded-md object-cover bg-muted",
   nowText: "flex min-w-0 flex-1 flex-col gap-1",
-  title: "text-sm font-medium leading-tight line-clamp-2 break-words",
+  /** clamped to two lines inline (TWO_LINES): Sharkord's CSS has no line-clamp-2 since v0.0.31 */
+  title: "text-sm font-medium leading-tight break-words overflow-hidden",
   meta: "text-xs text-muted-foreground",
   queue: "flex flex-col gap-1 border-t pt-3",
   queueRow: "flex items-center gap-2 min-w-0 rounded-sm",

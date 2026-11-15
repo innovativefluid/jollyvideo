@@ -6,9 +6,10 @@ Watch YouTube together in Sharkord voice channels.
 
 ## Install
 
-1. Download `jollyvideo-<version>.zip` from [Releases](https://github.com/innovativefluid/jollyvideo/releases/latest).
-2. Unpack it into Sharkord's `plugins` folder (`~/.config/sharkord/plugins`, in Docker `/home/bun/.config/sharkord/plugins`) and restart Sharkord.
-3. Turn it on under Server settings → Plugins.
+1. Download `jollyvideo-<version>.tar.gz` from [Releases](https://github.com/innovativefluid/jollyvideo/releases/latest).
+2. Drop it on Server settings → Plugins (Sharkord 0.0.31 or newer) and turn the plugin on. Updates go the same way, without a restart.
+
+Or unpack `jollyvideo-<version>.zip` into Sharkord's `plugins` folder (`~/.config/sharkord/plugins`, in Docker `/home/bun/.config/sharkord/plugins`), restart Sharkord and turn it on.
 
 On first start the server downloads yt-dlp and ffmpeg, checked against their SHA-256.
 

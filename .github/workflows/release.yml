@@ -98,7 +98,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           {
-            echo "**Install:** unpack \`jollyvideo-$VERSION.zip\` into Sharkord's \`plugins\` folder, restart Sharkord and turn the plugin on (see the README). The \`.sha256\` files hold the checksums, and \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` shows the file was built here."
+            echo "**Install:** drop \`jollyvideo-$VERSION.tar.gz\` on Server settings → Plugins and turn the plugin on, or unpack the \`.zip\` into Sharkord's \`plugins\` folder and restart (see the README). The \`.sha256\` files hold the checksums, and \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` shows the file was built here."
             echo
             echo "## What's new"
             echo

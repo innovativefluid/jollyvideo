@@ -52,9 +52,9 @@ export type TResolved = {
   storyboard: TSourceStoryboard | null;
 };
 
-export type TSourceStoryboard = { sheets: string[]; width: number; height: number; columns: number; rows: number; interval: number };
+type TSourceStoryboard = { sheets: string[]; width: number; height: number; columns: number; rows: number; interval: number };
 
-export type TLookupOptions = {
+type TLookupOptions = {
   /** jumps the queue of lookups: the video is needed now; asked again while it waits */
   urgent?: boolean | (() => boolean);
   /** where to keep the lookup's info JSON for the downloads */
@@ -64,7 +64,7 @@ export type TLookupOptions = {
 export type TPlaylistEntry = { videoId: string; title: string; duration: number };
 
 /** what the YouTube functions need from the server */
-export type TYtDlp = {
+type TYtDlp = {
   path: string;
   ffmpeg?: string;
   cookies?: string;

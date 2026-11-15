@@ -1,5 +1,5 @@
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import { activityLog, categories, channelReadStates, channelRolePermissions, channels, channelUserPermissions, directMessages, emojis, files, invites, logins, messageFiles, messageReactions, messages, rolePermissions, roles, settings, userRoles, users } from '../../../apps/server/src/db/schema';
+import type { activityLog, categories, channelReadStates, channelRolePermissions, channels, channelUserPermissions, directMessages, emojis, files, invites, logins, messageFiles, messageReactions, messages, rolePermissions, roles, settings, userRoles, users } from '../../../apps/server/src/db/schema';
 import type { Permission } from './statics';
 import type { UserStatus } from './types';
 export type TSettings = InferSelectModel<typeof settings>;

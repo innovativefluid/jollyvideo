@@ -195,7 +195,7 @@ const pl: Record<TMessageKey, string> = {
 };
 
 const CATALOGS: Record<string, Record<TMessageKey, string>> = { en, de, pl };
-export const LANGUAGES = Object.keys(CATALOGS);
+const LANGUAGES = Object.keys(CATALOGS);
 
 export const isMessageKey = (key: unknown): key is TMessageKey => typeof key === "string" && Object.hasOwn(en, key);
 

@@ -32,6 +32,8 @@ export declare const STORAGE_OVERFLOW_ACTION = StorageOverflowAction.PREVENT_UPL
 export declare const STORAGE_DEFAULT_SIGNED_URLS_TTL_SECONDS = 3600;
 export declare const STORAGE_MIN_SIGNED_URLS_TTL_SECONDS = 1800;
 export declare const STORAGE_MAX_SIGNED_URLS_TTL_SECONDS: number;
+export declare const FILE_TOKEN_REFRESH_GRACE_MS: number;
+export declare const FILE_TOKEN_REFRESH_MAX_FILES = 500;
 export declare const STORAGE_DEFAULT_IMAGE_OPTIMIZATION_QUALITY = 80;
 export declare const STORAGE_MIN_IMAGE_OPTIMIZATION_QUALITY = 1;
 export declare const STORAGE_MAX_IMAGE_OPTIMIZATION_QUALITY = 100;

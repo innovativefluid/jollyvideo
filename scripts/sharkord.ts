@@ -6,8 +6,8 @@
 import { rmSync } from "fs";
 import path from "path";
 
-const TAG = "v0.0.28";
-const COMMIT = "07ab40f7bd8b5102cedb55fa04ed03d22590be6d";
+const TAG = "v0.0.31";
+const COMMIT = "0da5bc193e45a8bd2d0ae46ef3c46c4a16cc7641";
 const target = path.join(import.meta.dir, "../.sharkord");
 
 const git = (...args: string[]) => {

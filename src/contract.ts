@@ -4,7 +4,7 @@
  */
 import type { TMessage } from "./i18n";
 
-export type TVideo = {
+type TVideo = {
   /** queue entry id, unique per add */
   id: string;
   title: string;

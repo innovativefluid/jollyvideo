@@ -1,6 +1,6 @@
 /** Small helpers around child processes. */
 
-export type TRunResult = { code: number; stdout: string; stderr: string };
+type TRunResult = { code: number; stdout: string; stderr: string };
 
 export type TRunOptions = {
   env?: Record<string, string | undefined>;
@@ -73,7 +73,7 @@ const signalGroup = (pid: number, signal: NodeJS.Signals) => {
  * asked first, since a killed launcher leaves its unpacked copy (80 MB) in the
  * temp folder; whatever is still there after `graceMs` is killed.
  */
-export const killTree = (child: { pid: number; kill(signal?: number | NodeJS.Signals): void }, graceMs = 2_000): void => {
+const killTree = (child: { pid: number; kill(signal?: number | NodeJS.Signals): void }, graceMs = 2_000): void => {
   if (process.platform === "win32") {
     try {
       Bun.spawn(["taskkill", "/pid", String(child.pid), "/T", "/F"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });

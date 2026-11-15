@@ -18,13 +18,18 @@ export type TExternalStream = {
     pluginId: string;
     avatarUrl?: string;
     bannerUrl?: string;
+    ownerUserId?: number;
     tracks: TExternalStreamTracks;
+};
+export type TVoiceChannelState = {
+    activeSince: number | null;
 };
 export type TChannelState = {
     users: TVoiceUser[];
     externalStreams: {
         [streamId: number]: TExternalStream;
     };
+    activeSince: number | null;
 };
 export type TTransportParams = {
     id: string;
@@ -37,6 +42,7 @@ export type TVoiceMap = {
         users: {
             [userId: number]: TVoiceUserState;
         };
+        activeSince: number | null;
     };
 };
 export type TExternalStreamsMap = {

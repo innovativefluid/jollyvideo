@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+Maintenance for Sharkord 0.0.31.
+
+- The release's `.tar.gz` can be dropped on Server settings → Plugins to install or update, without a restart.
+- Built and tested against Sharkord 0.0.31 on Bun 1.4.4; dependencies updated (React 19.3, mediasoup 3.32, Tailwind 4.3, lucide-react 1.70).
+- Removed unused exports; the video title keeps its two lines with Sharkord 0.0.31's styles.
+
 ## 0.6.0
 
 - The time bar's preview shows a small picture of the video at that time, from YouTube's storyboards (fetched through the server like the thumbnails).
